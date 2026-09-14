@@ -1,0 +1,698 @@
+[
+  {
+    "category": "Cars & RC Toys",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + range/character + vehicle type + main action + color + age",
+      "include_in_title": "Vehicle type, Pull Back/RC/Friction, color, scale or count, age",
+      "avoid_remove": "Do not repeat the brand or the word Toy",
+      "brand_exception": "Hot Wheels exception: use the box image/product image as the hero image."
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Clear Unpacked Front-Angle Diagonal View",
+        "description": "Show the unpacked vehicle, controller, wheels, mechanism, and supplied accessories at a clear 30–45° front angle. Keep the complete product visible and unobstructed."
+      },
+      {
+        "slot": 2,
+        "image_type": "Feature",
+        "description": "Feature: focus on one distinct and relevant part of the vehicle, controller, wheels, mechanism, and supplied accessories. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 3,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      },
+      {
+        "slot": 4,
+        "image_type": "Second Angle",
+        "description": "Show a clearly different view from earlier images, such as the opposite side, rear, top, open, folded or close-up view. It must reveal new product detail."
+      },
+      {
+        "slot": 5,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the vehicle, controller, wheels, mechanism, and supplied accessories in a realistic setting. Keep the product prominent and its scale believable."
+      },
+      {
+        "slot": 6,
+        "image_type": "Package / Complete Contents",
+        "description": "Show the correct retail package together with the vehicle, controller and every important supplied accessory. Contents must match the listed variant."
+      }
+    ],
+    "aliases": [
+      "Hot Wheels"
+    ]
+  },
+  {
+    "category": "Art, Craft & DIYs",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + theme/range + craft kit type + main activity/material + age",
+      "include_in_title": "Craft type, theme, main contents, age",
+      "avoid_remove": "Remove duplicate brand names and marketing words",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Box Front",
+        "description": "Show the complete front panel of the craft kit box. Brand, product name, theme and main artwork must be sharp and readable."
+      },
+      {
+        "slot": 2,
+        "image_type": "Contents",
+        "description": "Lay out all materials, tools, pieces and accessories supplied in the craft kit so each important item is identifiable."
+      },
+      {
+        "slot": 3,
+        "image_type": "Skills",
+        "description": "Show the specific skills supported by the activity, such as creativity, coordination, fine motor skills or problem-solving. Use only supported claims."
+      },
+      {
+        "slot": 4,
+        "image_type": "Learning",
+        "description": "Show what the activity teaches, such as colours, shapes, patterns, vocabulary or sequencing. The learning outcome must match the kit."
+      },
+      {
+        "slot": 5,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the craft kit, materials, tools, finished activity, and learning outcomes in a realistic setting. Keep the product prominent and its scale believable."
+      },
+      {
+        "slot": 6,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      }
+    ],
+    "aliases": []
+  },
+  {
+    "category": "Electronic & Interactive Toys",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + character/range + device type + 1-2 main functions + color + age",
+      "include_in_title": "Device type, light/sound/display, main learning function, color, age",
+      "avoid_remove": "Do not add every function to the title",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Open Device Front-Angle Diagonal View",
+        "description": "Show the device open at a 30–45° front angle so the screen, keyboard or control panel and product depth are clear. Use a straight front view only when an angled image is unavailable."
+      },
+      {
+        "slot": 2,
+        "image_type": "Feature 1",
+        "description": "Feature 1: focus on one distinct and relevant part of the device, screen, controls, lights, sound functions, and learning modes. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 3,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      },
+      {
+        "slot": 4,
+        "image_type": "Feature 2",
+        "description": "Feature 2: focus on one distinct and relevant part of the device, screen, controls, lights, sound functions, and learning modes. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1."
+      },
+      {
+        "slot": 5,
+        "image_type": "Feature 3",
+        "description": "Feature 3: focus on one distinct and relevant part of the device, screen, controls, lights, sound functions, and learning modes. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1 and feature_2."
+      },
+      {
+        "slot": 6,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the device, screen, controls, lights, sound functions, and learning modes in a realistic setting. Keep the product prominent and its scale believable."
+      }
+    ],
+    "aliases": []
+  },
+  {
+    "category": "Action Figures & Collectibles",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + character + figure type + size/feature + age",
+      "include_in_title": "Character, figure type, height, articulation/accessory, age",
+      "avoid_remove": "Remove words such as Ideal Gift and Classic",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Full Unpacked and Packed Front-Angle View",
+        "description": "Show the complete unpacked product and its matching retail package together at a clear front angle. Do not let the box hide the product."
+      },
+      {
+        "slot": 2,
+        "image_type": "Angle",
+        "description": "Show a clearly different view from earlier images, such as the opposite side, rear, top, open, folded or close-up view. It must reveal new product detail."
+      },
+      {
+        "slot": 3,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      },
+      {
+        "slot": 4,
+        "image_type": "Action",
+        "description": "Show the figure in a supported action pose, clearly demonstrating articulation, movement or use of an included accessory."
+      },
+      {
+        "slot": 5,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the figure, character details, articulation, accessories, pose, and packaging in a realistic setting. Keep the product prominent and its scale believable."
+      },
+      {
+        "slot": 6,
+        "image_type": "Box Back Content",
+        "description": "Show the full back panel of the box with included contents, features, instructions or character information readable."
+      }
+    ],
+    "aliases": []
+  },
+  {
+    "category": "Sports & Activities",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + sport/activity + set type + main contents/count + color + age",
+      "include_in_title": "Sport, set type, contents, size/count, age",
+      "avoid_remove": "Avoid vague phrases such as Fun for Kids",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Complete Unpacked Set",
+        "description": "Arrange the full sports or activity set outside the packaging. Display every important supplied item clearly without adding unrelated props."
+      },
+      {
+        "slot": 2,
+        "image_type": "Components",
+        "description": "Show the main product components and accessories separately in an organised layout. Include only items supplied with the product."
+      },
+      {
+        "slot": 3,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the sports set, equipment, components, play action, and setup in a realistic setting. Keep the product prominent and its scale believable."
+      },
+      {
+        "slot": 4,
+        "image_type": "Feature 1",
+        "description": "Feature 1: focus on one distinct and relevant part of the sports set, equipment, components, play action, and setup. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 5,
+        "image_type": "Feature 2",
+        "description": "Feature 2: focus on one distinct and relevant part of the sports set, equipment, components, play action, and setup. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1."
+      },
+      {
+        "slot": 6,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      }
+    ],
+    "aliases": [
+      "Outdoor & Sports"
+    ]
+  },
+  {
+    "category": "Building & Construction",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + theme + model/build subject + building set + piece count + age",
+      "include_in_title": "Finished model, piece count, age, useful model number",
+      "avoid_remove": "Do not start the title with the MPN",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Full Unpacked and Packed Front-Angle View",
+        "description": "Show the complete unpacked product and its matching retail package together at a clear front angle. Do not let the box hide the product."
+      },
+      {
+        "slot": 2,
+        "image_type": "Components",
+        "description": "Show the main product components and accessories separately in an organised layout. Include only items supplied with the product."
+      },
+      {
+        "slot": 3,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      },
+      {
+        "slot": 4,
+        "image_type": "Feature 1",
+        "description": "Feature 1: focus on one distinct and relevant part of the building set, blocks, components, completed model, and construction features. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 5,
+        "image_type": "Feature 2",
+        "description": "Feature 2: focus on one distinct and relevant part of the building set, blocks, components, completed model, and construction features. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1."
+      },
+      {
+        "slot": 6,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the building set, blocks, components, completed model, and construction features in a realistic setting. Keep the product prominent and its scale believable."
+      }
+    ],
+    "aliases": []
+  },
+  {
+    "category": "Pretend & Role Play",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + theme/range + role play set + important contents + age",
+      "include_in_title": "Role/theme, set type, tools/accessories, age",
+      "avoid_remove": "Avoid long benefit lists and gender targeting",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Assembled Product",
+        "description": "Show the product in its complete ready-to-use setup. The assembly must match the listed product and make the final form easy to understand."
+      },
+      {
+        "slot": 2,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the role-play set, assembled setup, tools, accessories, and play features in a realistic setting. Keep the product prominent and its scale believable."
+      },
+      {
+        "slot": 3,
+        "image_type": "Feature 1",
+        "description": "Feature 1: focus on one distinct and relevant part of the role-play set, assembled setup, tools, accessories, and play features. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 4,
+        "image_type": "Feature 2",
+        "description": "Feature 2: focus on one distinct and relevant part of the role-play set, assembled setup, tools, accessories, and play features. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1."
+      },
+      {
+        "slot": 5,
+        "image_type": "Feature 3",
+        "description": "Feature 3: focus on one distinct and relevant part of the role-play set, assembled setup, tools, accessories, and play features. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1 and feature_2."
+      },
+      {
+        "slot": 6,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      }
+    ],
+    "aliases": []
+  },
+  {
+    "category": "Games & Puzzles",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + game/puzzle name + type + player count + age",
+      "include_in_title": "Game type, players, strategy/travel only when important, age",
+      "avoid_remove": "Do not repeat Game or Toy; remove gifting words",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Packed Product Front",
+        "description": "Show the complete retail package from the front. Brand, product name, artwork and key pack information must be readable."
+      },
+      {
+        "slot": 2,
+        "image_type": "Assembled Product",
+        "description": "Show the product in its complete ready-to-use setup. The assembly must match the listed product and make the final form easy to understand."
+      },
+      {
+        "slot": 3,
+        "image_type": "Feature 1",
+        "description": "Feature 1: focus on one distinct and relevant part of the game or puzzle, packaging, setup, components, gameplay, and player use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 4,
+        "image_type": "Feature 2",
+        "description": "Feature 2: focus on one distinct and relevant part of the game or puzzle, packaging, setup, components, gameplay, and player use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1."
+      },
+      {
+        "slot": 5,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the game or puzzle, packaging, setup, components, gameplay, and player use in a realistic setting. Keep the product prominent and its scale believable."
+      },
+      {
+        "slot": 6,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      }
+    ],
+    "aliases": []
+  },
+  {
+    "category": "Educational Toys",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + range + learning toy type + activity/skill + age",
+      "include_in_title": "Learning format, activity count, main skill, age",
+      "avoid_remove": "Do not list every possible learning benefit",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Packed Product Front Diagonal View",
+        "description": "Show the complete package at a 30–45° angle, keeping the front panel readable while also showing the box depth."
+      },
+      {
+        "slot": 2,
+        "image_type": "Components",
+        "description": "Show the main product components and accessories separately in an organised layout. Include only items supplied with the product."
+      },
+      {
+        "slot": 3,
+        "image_type": "Feature 1",
+        "description": "Feature 1: focus on one distinct and relevant part of the learning toy, components, activities, skills, and educational functions. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 4,
+        "image_type": "Feature 2",
+        "description": "Feature 2: focus on one distinct and relevant part of the learning toy, components, activities, skills, and educational functions. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1."
+      },
+      {
+        "slot": 5,
+        "image_type": "Feature 3",
+        "description": "Feature 3: focus on one distinct and relevant part of the learning toy, components, activities, skills, and educational functions. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1 and feature_2."
+      },
+      {
+        "slot": 6,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the learning toy, components, activities, skills, and educational functions in a realistic setting. Keep the product prominent and its scale believable."
+      }
+    ],
+    "aliases": [
+      "Sensory Toys",
+      "Early Learning Toys",
+      "STEM Toys",
+      "Play & Learn",
+      "Skill Development Toys"
+    ]
+  },
+  {
+    "category": "Baby Toys",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + exact product type + main function + count/size + age in months",
+      "include_in_title": "Exact item, piece count, main function, age in months",
+      "avoid_remove": "Do not use Safe or Non-Toxic without proof",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Clear Unpacked Front-Angle Diagonal View",
+        "description": "Show the unpacked baby toy, shape, texture, activity features, scale, and supervised use at a clear 30–45° front angle. Keep the complete product visible and unobstructed."
+      },
+      {
+        "slot": 2,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the baby toy, shape, texture, activity features, scale, and supervised use in a realistic setting. Keep the product prominent and its scale believable."
+      },
+      {
+        "slot": 3,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      },
+      {
+        "slot": 4,
+        "image_type": "Feature 1",
+        "description": "Feature 1: focus on one distinct and relevant part of the baby toy, shape, texture, activity features, scale, and supervised use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 5,
+        "image_type": "Feature 2",
+        "description": "Feature 2: focus on one distinct and relevant part of the baby toy, shape, texture, activity features, scale, and supervised use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1."
+      },
+      {
+        "slot": 6,
+        "image_type": "Feature 3",
+        "description": "Feature 3: focus on one distinct and relevant part of the baby toy, shape, texture, activity features, scale, and supervised use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1 and feature_2."
+      }
+    ],
+    "aliases": []
+  },
+  {
+    "category": "Soft Toys",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + animal/character + soft toy + pose + color + height + age",
+      "include_in_title": "Animal/character, pose, color, height, age",
+      "avoid_remove": "Remove Pack of 1; write 25 cm with a space",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Full Front or Front-Angle View",
+        "description": "Show the complete soft toy from the front or a slight front angle. Its face, pose, colour and full shape must be visible."
+      },
+      {
+        "slot": 2,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the soft toy, character or animal form, texture, colour, size, and alternate sides in a realistic setting. Keep the product prominent and its scale believable."
+      },
+      {
+        "slot": 3,
+        "image_type": "Angle 1",
+        "description": "Show a clearly different view from earlier images, such as the opposite side, rear, top, open, folded or close-up view. It must reveal new product detail."
+      },
+      {
+        "slot": 4,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      },
+      {
+        "slot": 5,
+        "image_type": "Angle 2",
+        "description": "Show a clearly different view from earlier images, such as the opposite side, rear, top, open, folded or close-up view. It must reveal new product detail distinct from angle_1."
+      },
+      {
+        "slot": 6,
+        "image_type": "Angle 3",
+        "description": "Show a clearly different view from earlier images, such as the opposite side, rear, top, open, folded or close-up view. It must reveal new product detail distinct fro angle_1 and angle_2."
+      }
+    ],
+    "aliases": [
+      "Soft Toy"
+    ]
+  },
+  {
+    "category": "Tents & Slides",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + range + product type + size/capacity + color + use + age",
+      "include_in_title": "Type, assembled size, capacity, color, indoor/outdoor use, age",
+      "avoid_remove": "Avoid durability or safety claims without proof",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Fully Assembled Front-Angle View",
+        "description": "Show the fully assembled product at a 30–45° front angle. Keep the complete structure, access points and functional parts visible."
+      },
+      {
+        "slot": 2,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      },
+      {
+        "slot": 3,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the assembled tent or slide, dimensions, access points, construction, and supervised use in a realistic setting. Keep the product prominent and its scale believable."
+      },
+      {
+        "slot": 4,
+        "image_type": "Feature 1",
+        "description": "Feature 1: focus on one distinct and relevant part of the assembled tent or slide, dimensions, access points, construction, and supervised use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 5,
+        "image_type": "Feature 2",
+        "description": "Feature 2: focus on one distinct and relevant part of the assembled tent or slide, dimensions, access points, construction, and supervised use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1."
+      },
+      {
+        "slot": 6,
+        "image_type": "Feature 3",
+        "description": "Feature 3: focus on one distinct and relevant part of the assembled tent or slide, dimensions, access points, construction, and supervised use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1 and feature_2."
+      }
+    ],
+    "aliases": []
+  },
+  {
+    "category": "Toy Guns & Swords",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + range + toy type + mechanism + included darts/accessories + color + age",
+      "include_in_title": "Toy type, mechanism, foam dart count, color, age",
+      "avoid_remove": "Do not use Safe without proof; remove Pack of 1",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Fully Assembled Front-Angle View",
+        "description": "Show the fully assembled product at a 30–45° front angle. Keep the complete structure, access points and functional parts visible."
+      },
+      {
+        "slot": 2,
+        "image_type": "Angle 1",
+        "description": "Show a clearly different view from earlier images, such as the opposite side, rear, top, open, folded or close-up view. It must reveal new product detail."
+      },
+      {
+        "slot": 3,
+        "image_type": "Feature 1",
+        "description": "Feature 1: focus on one distinct and relevant part of the assembled toy, mechanism, included accessories, packaging, dimensions, and safe play. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 4,
+        "image_type": "Packed Product Front",
+        "description": "Show the complete retail package from the front. Brand, product name, artwork and key pack information must be readable."
+      },
+      {
+        "slot": 5,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      },
+      {
+        "slot": 6,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the assembled toy, mechanism, included accessories, packaging, dimensions, and safe play in a realistic setting. Keep the product prominent and its scale believable."
+      }
+    ],
+    "aliases": []
+  },
+  {
+    "category": "Dolls & Doll House",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + range/character + doll/doll house type + accessories + color/assorted + age",
+      "include_in_title": "Doll type, accessories/furniture, size, assorted status, age",
+      "avoid_remove": "Avoid Girl/Boy wording unless needed for the product identity",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Full Unpacked and Packed Front-Angle View",
+        "description": "Show the complete unpacked product and its matching retail package together at a clear front angle. Do not let the box hide the product."
+      },
+      {
+        "slot": 2,
+        "image_type": "Angle 1",
+        "description": "Show a clearly different view from earlier images, such as the opposite side, rear, top, open, folded or close-up view. It must reveal new product detail."
+      },
+      {
+        "slot": 3,
+        "image_type": "Angle 2",
+        "description": "Show a clearly different view from earlier images, such as the opposite side, rear, top, open, folded or close-up view. It must reveal new product detail distinct from angle_1."
+      },
+      {
+        "slot": 4,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the doll or doll house, packaging, accessories, furniture, and alternate views in a realistic setting. Keep the product prominent and its scale believable."
+      },
+      {
+        "slot": 5,
+        "image_type": "Angle 3",
+        "description": "Show a clearly different view from earlier images, such as the opposite side, rear, top, open, folded or close-up view. It must reveal new product detail distinct fro angle_1 and angle_2."
+      },
+      {
+        "slot": 6,
+        "image_type": "Angle 4",
+        "description": "Show a clearly different view from earlier images, such as the opposite side, rear, top, open, folded or close-up view. It must reveal new product detail distinct from angle_1, angle_2 and angle_3."
+      }
+    ],
+    "aliases": []
+  },
+  {
+    "category": "Ride-Ons & Tricycles",
+    "title_rule": {},
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Full View of Fully Assembled Product",
+        "description": "Show the complete ride-on or tricycle in its final ready-to-use form. Include the seat, handle, wheels and full body without cropping."
+      },
+      {
+        "slot": 2,
+        "image_type": "Size / Dimensions",
+        "description": "Show the product's relevant length, width, height, diameter or capacity using clear measurement lines and readable units."
+      },
+      {
+        "slot": 3,
+        "image_type": "Feature 1",
+        "description": "Feature 1: focus on one distinct and relevant part of the assembled ride-on, dimensions, controls, seat, wheels, features, and supervised use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 4,
+        "image_type": "Feature 2",
+        "description": "Feature 2: focus on one distinct and relevant part of the assembled ride-on, dimensions, controls, seat, wheels, features, and supervised use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1."
+      },
+      {
+        "slot": 5,
+        "image_type": "Feature 3",
+        "description": "Feature 3: focus on one distinct and relevant part of the assembled ride-on, dimensions, controls, seat, wheels, features, and supervised use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1 and feature_2."
+      },
+      {
+        "slot": 6,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the assembled ride-on, dimensions, controls, seat, wheels, features, and supervised use in a realistic setting. Keep the product prominent and its scale believable."
+      }
+    ],
+    "aliases": [
+      "Tricycles"
+    ]
+  },
+  {
+    "category": "Musical Instruments",
+    "title_rule": {
+      "title_formatting_rule": "Write the complete title in bold. Age group will not be used in title as it will be used in tags.",
+      "title_structure": "Brand + character/range + instrument type + sound/light feature + color + age",
+      "include_in_title": "Instrument, sound/rhythm, light, character, color, age",
+      "avoid_remove": "Remove Pack of 1 and generic For Kids wording",
+      "brand_exception": ""
+    },
+    "image_slots": [
+      {
+        "slot": 1,
+        "image_type": "Full Product View",
+        "description": "Show the complete musical instrument within the frame. Keep its body, controls and all fixed parts clearly visible."
+      },
+      {
+        "slot": 2,
+        "image_type": "Components / Dimensions",
+        "description": "Show the instrument and supplied components with clear measurement lines for the main product or key parts. Include readable units."
+      },
+      {
+        "slot": 3,
+        "image_type": "Feature 1",
+        "description": "Feature 1: focus on one distinct and relevant part of the instrument, components, controls, sound or light functions, dimensions, and use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims."
+      },
+      {
+        "slot": 4,
+        "image_type": "Feature 2",
+        "description": "Feature 2: focus on one distinct and relevant part of the instrument, components, controls, sound or light functions, dimensions, and use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1."
+      },
+      {
+        "slot": 5,
+        "image_type": "Feature 3",
+        "description": "Feature 3: focus on one distinct and relevant part of the instrument, components, controls, sound or light functions, dimensions, and use. Demonstrate a real function, material detail or mechanism without repeating earlier images or making unsupported claims distinct from feature_1 and feature_2."
+      },
+      {
+        "slot": 6,
+        "image_type": "Lifestyle Image",
+        "description": "Show age-appropriate, supervised use of the instrument, components, controls, sound or light functions, dimensions, and use in a realistic setting. Keep the product prominent and its scale believable."
+      }
+    ],
+    "aliases": []
+  }
+]

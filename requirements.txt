@@ -1,0 +1,11 @@
+# Pinned to the versions this pipeline was verified against. Loosen to
+# `>=` only if you need to; a surprise major bump in pandas mid-rollout is
+# not what you want halfway through 2000 products.
+#
+# Both classification (step 2) and generation (step 3) run on Vertex AI —
+# one GCP credential covers both, no separate Anthropic account needed.
+pandas>=2.0,<4
+openpyxl>=3.1,<4
+requests>=2.31,<3
+google-auth>=2.28,<3
+pillow>=10.0,<12
