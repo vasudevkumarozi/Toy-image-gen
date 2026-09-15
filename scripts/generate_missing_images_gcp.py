@@ -463,6 +463,21 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
     dimension_note = ""
     image_type_lower = slot_info["image_type"].lower()
     if "size" in image_type_lower or "dimension" in image_type_lower:
+        if is_boxed_multipiece_product(category, product_name, description, specifications):
+            # Requested: a peg puzzle's dimension shot showed the board
+            # assembled/open with its wooden pegs placed in their slots —
+            # accurate to the product, but reads as "scattered" rather
+            # than a clean size reference. For this category, show the
+            # CLOSED retail box instead.
+            dimension_note += (
+                "\n\nThis product is sold as a packaged retail box containing "
+                "multiple loose pieces (puzzle pegs, blocks, or similar). For "
+                "this Size/Dimensions image, depict the product in its "
+                "CLOSED, SEALED retail packaging box — as it would look on a "
+                "store shelf before opening — NOT the assembled or open "
+                "product with pieces placed in slots, removed, or scattered "
+                "around it. Draw the measurement arrows on that closed box."
+            )
         # Specifications' "Dimensions (LxBxH)" wins over anything embedded
         # in the free-text description on conflict — see
         # merge_product_fields for why these can genuinely disagree.
@@ -471,13 +486,13 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
             # Without this, the model invents plausible-looking but wrong
             # numbers on the measurement lines — it has no way to know the
             # real size just from a photo. Real data beats a nice-looking guess.
-            dimension_note = (
+            dimension_note += (
                 f"\n\nIMPORTANT — real measurements: the manufacturer lists this "
                 f"product's actual size as {real_dims}. Use these exact numbers on "
                 f"the measurement lines and labels. Do not invent different numbers."
             )
         else:
-            dimension_note = (
+            dimension_note += (
                 f"\n\nNo exact manufacturer measurements were provided for this "
                 f"product. Draw proportionate measurement lines based on the "
                 f"reference image, and keep any numbers plausible for a product of "
@@ -1018,6 +1033,24 @@ def axis_label_magnitude(label: str) -> float:
 
 VEHICLE_KEYWORDS = ("cars & rc", "rc toy", "ride-on", "ride on", "tricycle", "wheel")
 
+MULTIPIECE_KEYWORDS = ("puzzle", "block set", "building block", "peg puzzle",
+                       "sound puzzle", "stacking", "knobbed", "cylinder block")
+
+
+def is_boxed_multipiece_product(category: str, product_name: str, description: str,
+                                specifications: str) -> bool:
+    """Whether the Size/Dimensions image should show the CLOSED retail
+    packaging box rather than the assembled/open product. A real dimension
+    image for a peg puzzle showed the board with its wooden pegs placed in
+    their slots at an angle — accurate to how the product looks in use, but
+    the user wants the closed box for this category instead, since an
+    open/assembled multi-piece product reads as "scattered" rather than a
+    clean, unambiguous shelf-ready size reference. Real product data for
+    this category rarely states an exact piece count in text, so this
+    matches on keyword alone rather than requiring a "N pieces" pattern."""
+    haystack = f"{category} {product_name} {description} {specifications}".lower()
+    return any(k in haystack for k in MULTIPIECE_KEYWORDS)
+
 
 def is_vehicle_product(category: str, product_name: str, description: str,
                        specifications: str) -> bool:
@@ -1151,16 +1184,18 @@ DIMENSION_VERIFY_SCHEMA = {
         # each label's name character-for-character (not auto-corrected)
         # lets us catch this deterministically in code, the same pattern
         # used for the magnitude/wheel checks above.
-        "label_name_texts": {
+        "label_full_texts": {
             "type": "ARRAY",
             "items": {"type": "STRING"},
-            "description": ("The NAME word of EVERY text label in the image (Length, "
-                           "Breadth, Height, Width, Depth, etc.) — including any label "
-                           "that has no arrow of its own, just plain text. Transcribe "
-                           "each one EXACTLY as it is spelled/rendered in the image, "
-                           "character for character, even if it looks misspelled — do "
-                           "NOT auto-correct it to what you think it was supposed to "
-                           "say. One entry per label."),
+            "description": ("The COMPLETE text of EVERY measurement label in the "
+                           "image — name AND number AND unit together (e.g. "
+                           "\"Height 1.5 cm\") — including any label that has no "
+                           "arrow of its own, just plain text. Transcribe each one "
+                           "EXACTLY as it is spelled/rendered in the image, "
+                           "character for character, even if it looks misspelled "
+                           "or the number looks wrong (e.g. a missing decimal "
+                           "point) — do NOT auto-correct it to what you think it "
+                           "was supposed to say. One entry per label."),
         },
         "valid": {"type": "BOOLEAN"},
         "arrow_count": {"type": "INTEGER"},
@@ -1188,8 +1223,11 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
     """
     names = [label.split()[0] for label in axis_labels]
     n = len(names)
-    text_only_name = text_only_label.split()[0] if text_only_label else None
-    expected_spelling_names = names + ([text_only_name] if text_only_name else [])
+    # Full text (name + number + unit), not just the name — a real image
+    # spelled "Height" correctly but rendered "1.5 cm" as "1 5 cm" (dropped
+    # the decimal point), which a name-only check would have missed
+    # entirely since "Height" was spelled fine.
+    expected_full_labels = axis_labels + ([text_only_label] if text_only_label else [])
 
     horizontal_labels = [l for l in axis_labels if not l.startswith("Height")]
     expected_longest_name = None
@@ -1250,8 +1288,8 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
 
     text_only_note = (
         f" The image should also show \"{text_only_label}\" as a plain text "
-        f"label with no arrow of its own — include its name in "
-        f"label_name_texts too."
+        f"label with no arrow of its own — include its full text in "
+        f"label_full_texts too."
         if text_only_label else ""
     )
     prompt = (
@@ -1279,11 +1317,12 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
         f"duplicate); (3) no arrow crosses, overlaps, or touches the "
         f"product itself or anything attached to it (like a rope, strap, "
         f"or handle) — every arrow must lie entirely in empty background "
-        f"space; (4) fill in label_name_texts with the EXACT spelling of "
-        f"every text label's name in the image, transcribed character for "
-        f"character even if it looks misspelled — do not silently "
-        f"auto-correct a typo when transcribing it. Set valid=true only if "
-        f"(1)-(3) hold for every arrow in arrows_found.{magnitude_check}"
+        f"space; (4) fill in label_full_texts with the EXACT text of every "
+        f"label — name, number, AND unit — transcribed character for "
+        f"character even if it looks misspelled or the number looks wrong "
+        f"(e.g. a missing decimal point) — do not silently auto-correct "
+        f"anything when transcribing it. Set valid=true only if (1)-(3) "
+        f"hold for every arrow in arrows_found.{magnitude_check}"
     )
     endpoint = (
         f"https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}"
@@ -1353,22 +1392,30 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
                     reason = (f"axis_swap_detected: model reported '{reported}' as the "
                              f"visually longest horizontal arrow, but '{expected_longest_name}' "
                              f"has the larger number and should be longest. ({reason})")
-        # Deterministic spelling check — real output rendered "Breadeth"
-        # for "Breadth" and "Heglt" for "Height", both passed by the
-        # verifier because it was never asked to check spelling at all.
-        # Comparing the model's own (not-auto-corrected) transcription
-        # against the exact expected name in code catches this the same
-        # way the swap-check above catches a bad holistic judgment.
-        reported_names_lower = [
-            (t or "").strip().lower() for t in (parsed.get("label_name_texts") or [])
+        # Deterministic text check — real output rendered "Breadeth" for
+        # "Breadth", "Heglt" for "Height", and (separately) dropped the
+        # decimal point in "1.5 cm" so it read as "1 5 cm" (i.e. 15 cm) —
+        # all passed the verifier because it was never asked to check the
+        # label text at all. Comparing the model's own (not-auto-corrected)
+        # full-text transcription against the exact expected string in
+        # code catches both the name AND the number, the same way the
+        # swap-check above catches a bad holistic judgment. Whitespace is
+        # stripped before comparing since the model may report a stray or
+        # missing space that isn't the defect we care about here.
+        def _normalize_label_text(s: str) -> str:
+            return re.sub(r"\s+", "", (s or "")).lower()
+
+        reported_full_lower = [
+            _normalize_label_text(t) for t in (parsed.get("label_full_texts") or [])
         ]
-        for expected_name in expected_spelling_names:
-            if expected_name.lower() not in reported_names_lower:
+        for expected_full in expected_full_labels:
+            if _normalize_label_text(expected_full) not in reported_full_lower:
                 valid = False
-                reason = (f"spelling_error: expected a label spelled '{expected_name}' "
+                reason = (f"text_error: expected a label reading '{expected_full}' "
                          f"but it was not found among the transcribed labels "
-                         f"{parsed.get('label_name_texts')!r} — likely misspelled or "
-                         f"missing in the image. ({reason})")
+                         f"{parsed.get('label_full_texts')!r} — likely misspelled, a "
+                         f"corrupted number (e.g. a missing decimal point), or "
+                         f"missing from the image. ({reason})")
         return {"valid": valid, "reason": reason}
     except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError) as e:
         return {"valid": True, "reason": f"verification_error: {e}"}
