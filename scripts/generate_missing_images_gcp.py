@@ -1036,6 +1036,24 @@ DIMENSION_VERIFY_SCHEMA = {
                            "\"Length\" by definition. Just the name. Leave "
                            "blank if this product has no wheels."),
         },
+        # Real output rendered "Breadeth" instead of "Breadth" (and, in an
+        # earlier image, "Heglt" instead of "Height") — a spelling glitch
+        # in the model's own text rendering, not a prompt-wording problem,
+        # since the correct spelling is what we asked for. Transcribing
+        # each label's name character-for-character (not auto-corrected)
+        # lets us catch this deterministically in code, the same pattern
+        # used for the magnitude/wheel checks above.
+        "label_name_texts": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+            "description": ("The NAME word of EVERY text label in the image (Length, "
+                           "Breadth, Height, Width, Depth, etc.) — including any label "
+                           "that has no arrow of its own, just plain text. Transcribe "
+                           "each one EXACTLY as it is spelled/rendered in the image, "
+                           "character for character, even if it looks misspelled — do "
+                           "NOT auto-correct it to what you think it was supposed to "
+                           "say. One entry per label."),
+        },
         "valid": {"type": "BOOLEAN"},
         "arrow_count": {"type": "INTEGER"},
         "reason": {"type": "STRING"},
@@ -1046,7 +1064,7 @@ DIMENSION_VERIFY_SCHEMA = {
 
 def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: str,
                           region: str, tokens: VertexTokenProvider,
-                          is_vehicle: bool = False) -> dict:
+                          is_vehicle: bool = False, text_only_label: str = "") -> dict:
     """Checks a generated dimension image against its own ground truth — the
     exact set of named measurements it was asked to draw — instead of
     trusting the generation call got it right. Real output repeatedly came
@@ -1062,6 +1080,8 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
     """
     names = [label.split()[0] for label in axis_labels]
     n = len(names)
+    text_only_name = text_only_label.split()[0] if text_only_label else None
+    expected_spelling_names = names + ([text_only_name] if text_only_name else [])
 
     horizontal_labels = [l for l in axis_labels if not l.startswith("Height")]
     expected_longest_name = None
@@ -1103,10 +1123,16 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
                 f"true longer edge look shorter on screen."
             )
 
+    text_only_note = (
+        f" The image should also show \"{text_only_label}\" as a plain text "
+        f"label with no arrow of its own — include its name in "
+        f"label_name_texts too."
+        if text_only_label else ""
+    )
     prompt = (
         f"This product image is supposed to show exactly {n} measurement "
         f"arrows for these named dimensions, each appearing exactly once: "
-        f"{', '.join(names)}. "
+        f"{', '.join(names)}.{text_only_note} "
         f"First, scan the ENTIRE image very carefully — including the "
         f"interior and center of the product, not just its outer edges "
         f"and background — and list EVERY measurement arrow or double-headed "
@@ -1128,8 +1154,11 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
         f"duplicate); (3) no arrow crosses, overlaps, or touches the "
         f"product itself or anything attached to it (like a rope, strap, "
         f"or handle) — every arrow must lie entirely in empty background "
-        f"space. Set valid=true only if (1)-(3) hold for every arrow in "
-        f"arrows_found.{magnitude_check}"
+        f"space; (4) fill in label_name_texts with the EXACT spelling of "
+        f"every text label's name in the image, transcribed character for "
+        f"character even if it looks misspelled — do not silently "
+        f"auto-correct a typo when transcribing it. Set valid=true only if "
+        f"(1)-(3) hold for every arrow in arrows_found.{magnitude_check}"
     )
     endpoint = (
         f"https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}"
@@ -1191,6 +1220,22 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
                     reason = (f"axis_swap_detected: model reported '{reported}' as the "
                              f"visually longest horizontal arrow, but '{expected_longest_name}' "
                              f"has the larger number and should be longest. ({reason})")
+        # Deterministic spelling check — real output rendered "Breadeth"
+        # for "Breadth" and "Heglt" for "Height", both passed by the
+        # verifier because it was never asked to check spelling at all.
+        # Comparing the model's own (not-auto-corrected) transcription
+        # against the exact expected name in code catches this the same
+        # way the swap-check above catches a bad holistic judgment.
+        reported_names_lower = [
+            (t or "").strip().lower() for t in (parsed.get("label_name_texts") or [])
+        ]
+        for expected_name in expected_spelling_names:
+            if expected_name.lower() not in reported_names_lower:
+                valid = False
+                reason = (f"spelling_error: expected a label spelled '{expected_name}' "
+                         f"but it was not found among the transcribed labels "
+                         f"{parsed.get('label_name_texts')!r} — likely misspelled or "
+                         f"missing in the image. ({reason})")
         return {"valid": valid, "reason": reason}
     except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError) as e:
         return {"valid": True, "reason": f"verification_error: {e}"}
@@ -1201,7 +1246,8 @@ MAX_GENERATION_ATTEMPTS = 3
 
 def generate_image_with_verification(reference_url: str, prompt: str, out_path: str,
                                      project_id: str, region: str, tokens: VertexTokenProvider,
-                                     axis_labels: list, is_vehicle: bool = False) -> dict:
+                                     axis_labels: list, is_vehicle: bool = False,
+                                     text_only_label: str = "") -> dict:
     """Wraps generate_image with the verify-and-retry loop: for a slot with
     checkable ground truth (axis_labels non-empty), regenerate up to
     MAX_GENERATION_ATTEMPTS (3, capped — real cost per attempt) total times
@@ -1225,7 +1271,7 @@ def generate_image_with_verification(reference_url: str, prompt: str, out_path: 
         with open(out_path, "rb") as f:
             image_bytes = f.read()
         verdict = verify_dimension_image(image_bytes, axis_labels, project_id, region, tokens,
-                                        is_vehicle=is_vehicle)
+                                        is_vehicle=is_vehicle, text_only_label=text_only_label)
         if verdict["valid"]:
             return result
         last_result = {"status": f"generated_unverified: {verdict['reason']}"}
@@ -1477,6 +1523,7 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
     # even with an explicit prompt.
     axis_labels = []
     is_vehicle = False
+    text_only_label = ""
     if "size" in image_type_lower or "dimension" in image_type_lower:
         axis_labels = compute_axis_labels(task["description"], task["specifications"])
         is_vehicle = is_vehicle_product(task["rule_category"], task["product_name"],
@@ -1484,11 +1531,13 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
         # Keep verification in sync with what the prompt actually asked
         # for — vehicles get the side-profile 2-arrow layout (Breadth as
         # text only, no arrow), so the verifier must check for 2 arrows,
-        # not 3, or it would flag a correct image as missing one.
-        axis_labels, _ = resolve_dimension_layout(axis_labels, is_vehicle)
+        # not 3, or it would flag a correct image as missing one. The
+        # text-only label still needs its own spelling checked, so it's
+        # passed through separately rather than discarded.
+        axis_labels, text_only_label = resolve_dimension_layout(axis_labels, is_vehicle)
     result = generate_image_with_verification(
         task["reference_url"], prompt, out_path, project_id, region, tokens, axis_labels,
-        is_vehicle=is_vehicle)
+        is_vehicle=is_vehicle, text_only_label=text_only_label)
     status = result["status"]
     generated = status == "generated" or status.startswith("generated_unverified")
     gcp_link = ""
