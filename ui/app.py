@@ -16,12 +16,18 @@ to SSH into and tail.
 Run it with:
     streamlit run ui/app.py
 """
+# Defers annotation evaluation so `str | None` below doesn't hard-require
+# Python 3.10+ — the deploy instance's base image isn't guaranteed to be
+# on a version that supports PEP 604 syntax natively.
+from __future__ import annotations
+
 import json
 import os
 import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -167,7 +173,11 @@ if run_clicked and uploaded is not None:
         st.error("Fix the missing environment variables in the sidebar before running.")
         st.stop()
 
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # uuid suffix, not just the timestamp — on a shared instance, two
+    # people (or one impatient double-click) starting a run in the same
+    # second would otherwise get the SAME folder and silently clobber
+    # each other's input/output files mid-run.
+    run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
     run_dir = RUNS_DIR / run_id
     run_dir.mkdir(parents=True, exist_ok=True)
 
