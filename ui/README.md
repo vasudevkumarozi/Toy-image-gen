@@ -15,7 +15,9 @@ streamlit run ui/app.py
 
 Opens at `http://localhost:8501`. On an instance, run the same command
 and either port-forward (`ssh -L 8501:localhost:8501 <instance>`) or open
-the port in the firewall — see the main README for instance setup.
+the port in the firewall — see [`../DEPLOY.md`](../DEPLOY.md) for the
+actual instance commands (start/stop/tunnel) already set up for this
+project's GCP instance.
 
 ## What it does
 
