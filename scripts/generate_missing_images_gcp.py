@@ -473,84 +473,128 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
         # out the exact arrow count and where they may NOT go.
         axis_labels = AXIS_LABEL_RE.findall(real_dims)
         if axis_labels:
-            # extract_dimensions_from_description already resolved which
-            # raw number is which axis (Length/Breadth/Height, ...) when
-            # the source key spelled out an order like "(LxBxH)" — a real
-            # product still came back with only 2 of 3 arrows drawn and
-            # the vertical one mislabeled with the wrong axis's number, so
-            # this spells out each named measurement individually rather
-            # than trusting the model to keep an unlabeled triple straight.
-            n = len(axis_labels)
-            horizontal_labels = [l for l in axis_labels if not l.startswith("Height")]
-            magnitude_note = ""
-            if len(horizontal_labels) >= 2:
-                ordered = sorted(horizontal_labels, key=axis_label_magnitude, reverse=True)
-                magnitude_note = (
-                    f" Among the horizontal measurements, \"{ordered[0]}\" is the "
-                    f"LARGEST number — its arrow must run along the visually LONGEST "
-                    f"horizontal edge of the product. \"{ordered[-1]}\" is the "
-                    f"SMALLEST — its arrow must run along the visually SHORTEST "
-                    f"horizontal edge, perpendicular to the longest one. A real "
-                    f"product came back with these two swapped (the bigger number "
-                    f"attached to the visually shorter edge and vice versa) — match "
-                    f"each arrow to its edge by actual visual proportion in the "
-                    f"reference image, not by assuming which name conventionally "
-                    f"goes where."
+            is_vehicle = is_vehicle_product(category, product_name, description, specifications)
+            arrow_labels, text_only_label = resolve_dimension_layout(axis_labels, is_vehicle)
+            if text_only_label:
+                # Structural fix, not another wording change — every
+                # magnitude/wheel-landmark prompt tried on real vehicles
+                # still swapped Length/Breadth. A strict side-profile shot
+                # with only ONE horizontal arrow removes the judgment call
+                # entirely: there's no second horizontal arrow left for the
+                # model to place on the wrong edge, and Breadth isn't
+                # visually measurable edge-on from a side profile anyway,
+                # so it becomes a plain text spec line instead.
+                length_label = next((l for l in arrow_labels if l.startswith("Length")), None)
+                height_label = next((l for l in arrow_labels if l.startswith("Height")), "Height")
+                n = len(arrow_labels)
+                dimension_note += (
+                    f"\n\nCamera angle — this is a wheeled vehicle: frame it in a "
+                    f"strict SIDE-PROFILE view, camera positioned directly to the "
+                    f"side and perpendicular to the vehicle's length (NOT a 3/4 "
+                    f"angle, NOT a front/rear angle) — so the wheelbase and the "
+                    f"vehicle's height are both visible edge-on, with no horizontal "
+                    f"foreshortening to judge.\n\nArrow rules: draw EXACTLY {n} "
+                    f"arrows on this entire image and nothing else — one for "
+                    f"\"{length_label}\", running along the ground from the front "
+                    f"wheel to the back wheel (the same side, nose to tail, the "
+                    f"wheelbase), and one for \"{height_label}\", running vertically "
+                    f"from the ground up to the vehicle's own top surface. Do NOT "
+                    f"draw an arrow for \"{text_only_label}\" — from this "
+                    f"side-profile angle it is not visible edge-on, so instead print "
+                    f"\"{text_only_label}\" as a plain text label with no arrow and "
+                    f"no line, sourced from the manufacturer measurement given "
+                    f"above, placed in an empty corner of the image away from the "
+                    f"two arrows. Never any additional, extra, or unlabeled arrow "
+                    f"anywhere in the image for any other part or feature — if it "
+                    f"isn't \"{length_label}\" or \"{height_label}\", it gets no "
+                    f"arrow at all, no matter how prominent that part looks (e.g. a "
+                    f"hanging rope, strap, cord, or handle is NOT one of these "
+                    f"measurements, so it gets no arrow of its own). Every arrow and "
+                    f"its label must start and end in the empty background space "
+                    f"OUTSIDE the vehicle's outline, alongside it — none may cross, "
+                    f"overlap, touch, or be drawn on top of the vehicle itself or "
+                    f"anything attached to it."
                 )
-                if is_vehicle_product(category, product_name, description, specifications):
-                    magnitude_note += (
-                        f" This is a wheeled vehicle: use the wheels as your "
-                        f"landmark rather than judging apparent length. The "
-                        f"wheels/axles run along the vehicle's real-world LENGTH "
-                        f"(nose to tail) — so \"{ordered[0]}\" (the larger "
-                        f"measurement) must be drawn along that same direction, "
-                        f"front wheel to rear wheel. \"{ordered[-1]}\" (the "
-                        f"smaller measurement) must be drawn across the narrow "
-                        f"front or back face, perpendicular to the wheels — "
-                        f"never along the wheelbase."
+                axis_labels = arrow_labels
+            else:
+                # extract_dimensions_from_description already resolved which
+                # raw number is which axis (Length/Breadth/Height, ...) when
+                # the source key spelled out an order like "(LxBxH)" — a real
+                # product still came back with only 2 of 3 arrows drawn and
+                # the vertical one mislabeled with the wrong axis's number, so
+                # this spells out each named measurement individually rather
+                # than trusting the model to keep an unlabeled triple straight.
+                n = len(axis_labels)
+                horizontal_labels = [l for l in axis_labels if not l.startswith("Height")]
+                magnitude_note = ""
+                if len(horizontal_labels) >= 2:
+                    ordered = sorted(horizontal_labels, key=axis_label_magnitude, reverse=True)
+                    magnitude_note = (
+                        f" Among the horizontal measurements, \"{ordered[0]}\" is the "
+                        f"LARGEST number — its arrow must run along the visually LONGEST "
+                        f"horizontal edge of the product. \"{ordered[-1]}\" is the "
+                        f"SMALLEST — its arrow must run along the visually SHORTEST "
+                        f"horizontal edge, perpendicular to the longest one. A real "
+                        f"product came back with these two swapped (the bigger number "
+                        f"attached to the visually shorter edge and vice versa) — match "
+                        f"each arrow to its edge by actual visual proportion in the "
+                        f"reference image, not by assuming which name conventionally "
+                        f"goes where."
                     )
-                # Real output still swapped these even with the instructions
-                # above (both for a vehicle and for a plain box) — adding a
-                # concrete self-check step, not just another way of stating
-                # the same rule, since asking the model to verify its own
-                # draft before finalizing is a different mechanism than
-                # asking it to get the judgment right on the first pass.
-                magnitude_note += (
-                    f" Self-check before finalizing this image: look at the two "
-                    f"horizontal arrows you have actually drawn and compare their "
-                    f"pixel lengths on the page. If the arrow labeled "
-                    f"\"{ordered[-1]}\" (the smaller number) is drawn LONGER on "
-                    f"the page than the arrow labeled \"{ordered[0]}\" (the "
-                    f"larger number), that is backwards — swap which label is on "
-                    f"which arrow (keep the arrows themselves where they are, "
-                    f"just correct which text goes on which one) before producing "
-                    f"the final image."
+                    if is_vehicle:
+                        magnitude_note += (
+                            f" This is a wheeled vehicle: use the wheels as your "
+                            f"landmark rather than judging apparent length. The "
+                            f"wheels/axles run along the vehicle's real-world LENGTH "
+                            f"(nose to tail) — so \"{ordered[0]}\" (the larger "
+                            f"measurement) must be drawn along that same direction, "
+                            f"front wheel to rear wheel. \"{ordered[-1]}\" (the "
+                            f"smaller measurement) must be drawn across the narrow "
+                            f"front or back face, perpendicular to the wheels — "
+                            f"never along the wheelbase."
+                        )
+                    # Real output still swapped these even with the instructions
+                    # above (both for a vehicle and for a plain box) — adding a
+                    # concrete self-check step, not just another way of stating
+                    # the same rule, since asking the model to verify its own
+                    # draft before finalizing is a different mechanism than
+                    # asking it to get the judgment right on the first pass.
+                    magnitude_note += (
+                        f" Self-check before finalizing this image: look at the two "
+                        f"horizontal arrows you have actually drawn and compare their "
+                        f"pixel lengths on the page. If the arrow labeled "
+                        f"\"{ordered[-1]}\" (the smaller number) is drawn LONGER on "
+                        f"the page than the arrow labeled \"{ordered[0]}\" (the "
+                        f"larger number), that is backwards — swap which label is on "
+                        f"which arrow (keep the arrows themselves where they are, "
+                        f"just correct which text goes on which one) before producing "
+                        f"the final image."
+                    )
+                dimension_note += (
+                    f"\n\nArrow rules: draw EXACTLY {n} arrows on this entire image, one "
+                    f"for each of these named measurements and nothing else — "
+                    f"{', '.join(axis_labels)}. Never more than {n}, never fewer, never "
+                    f"two arrows for the same measurement, and never any additional, "
+                    f"extra, or unlabeled arrow anywhere in the image for any other part "
+                    f"or feature — if it isn't one of these {n} named measurements, it "
+                    f"gets no arrow at all, no matter how prominent that part looks (e.g. "
+                    f"a hanging rope, strap, cord, handle, or other attachment is NOT one "
+                    f"of the {n} measurements unless explicitly named above, so it gets no "
+                    f"arrow of its own). Each arrow must run along the real-world axis its "
+                    f"name describes (the Height arrow vertical along the product's actual "
+                    f"height, the Length/Width/Breadth/Depth arrows along their own "
+                    f"horizontal axes) — do not attach a label to the wrong axis or drop "
+                    f"any of the {n} listed measurements.{magnitude_note} A base that is "
+                    f"wider at the back than the front (a common perspective effect) "
+                    f"still has only ONE length and ONE breadth — do not draw the same "
+                    f"measurement a second time from the opposite corner or the far edge "
+                    f"just because it is visible there too; pick ONE corner of the "
+                    f"product and draw all {n} arrows radiating from measurements "
+                    f"anchored at or near that single corner only. Every arrow and its "
+                    f"label must start and end in the empty background space OUTSIDE the "
+                    f"product's outline, alongside it — none may cross, overlap, touch, "
+                    f"or be drawn on top of the product itself or anything attached to it."
                 )
-            dimension_note += (
-                f"\n\nArrow rules: draw EXACTLY {n} arrows on this entire image, one "
-                f"for each of these named measurements and nothing else — "
-                f"{', '.join(axis_labels)}. Never more than {n}, never fewer, never "
-                f"two arrows for the same measurement, and never any additional, "
-                f"extra, or unlabeled arrow anywhere in the image for any other part "
-                f"or feature — if it isn't one of these {n} named measurements, it "
-                f"gets no arrow at all, no matter how prominent that part looks (e.g. "
-                f"a hanging rope, strap, cord, handle, or other attachment is NOT one "
-                f"of the {n} measurements unless explicitly named above, so it gets no "
-                f"arrow of its own). Each arrow must run along the real-world axis its "
-                f"name describes (the Height arrow vertical along the product's actual "
-                f"height, the Length/Width/Breadth/Depth arrows along their own "
-                f"horizontal axes) — do not attach a label to the wrong axis or drop "
-                f"any of the {n} listed measurements.{magnitude_note} A base that is "
-                f"wider at the back than the front (a common perspective effect) "
-                f"still has only ONE length and ONE breadth — do not draw the same "
-                f"measurement a second time from the opposite corner or the far edge "
-                f"just because it is visible there too; pick ONE corner of the "
-                f"product and draw all {n} arrows radiating from measurements "
-                f"anchored at or near that single corner only. Every arrow and its "
-                f"label must start and end in the empty background space OUTSIDE the "
-                f"product's outline, alongside it — none may cross, overlap, touch, "
-                f"or be drawn on top of the product itself or anything attached to it."
-            )
         else:
             dimension_note += (
                 "\n\nArrow rules: draw exactly one arrow per dimension given above "
@@ -850,6 +894,37 @@ def is_vehicle_product(category: str, product_name: str, description: str,
     return any(k in haystack for k in VEHICLE_KEYWORDS)
 
 
+def resolve_dimension_layout(axis_labels: list, is_vehicle: bool) -> tuple:
+    """For vehicles, collapses the arrow layout from 3 down to 2: keep
+    Length (front wheel to back wheel) and Height (ground to top surface)
+    as drawn arrows, and push Breadth to a plain text-only label with no
+    arrow of its own.
+
+    This is a structural fix, not another wording change — prompt-only
+    instructions (magnitude comparison, then vague wheel landmarks, then
+    exact wheel-to-wheel landmarks) all still produced a Length/Breadth
+    swap on real vehicles across multiple attempts, including when the
+    model was told to self-check its own arrow lengths before finalizing.
+    Reframing to a side-profile shot with only one horizontal arrow removes
+    the judgment call entirely — there is no second horizontal arrow left
+    for the model to place on the wrong edge, and Breadth isn't visually
+    measurable edge-on from a side profile anyway.
+
+    Returns (arrow_labels, text_only_label). For non-vehicles, or a vehicle
+    missing a clear Length/Breadth pair, arrow_labels is axis_labels
+    unchanged and text_only_label is None.
+    """
+    if not is_vehicle:
+        return axis_labels, None
+    length_label = next((l for l in axis_labels if l.startswith("Length")), None)
+    breadth_label = next((l for l in axis_labels
+                          if l.startswith("Breadth") or l.startswith("Width")), None)
+    if not length_label or not breadth_label:
+        return axis_labels, None
+    arrow_labels = [l for l in axis_labels if l != breadth_label]
+    return arrow_labels, breadth_label
+
+
 def compute_axis_labels(description: str, specifications: str) -> list:
     """The same axis-name extraction used inside build_generation_prompt's
     dimension_note, exposed standalone so the caller can decide up front
@@ -915,9 +990,10 @@ DIMENSION_VERIFY_SCHEMA = {
         "wheel_direction_arrow_label": {
             "type": "STRING",
             "description": ("Only for a wheeled vehicle product: which named "
-                           "horizontal measurement's arrow runs in the SAME "
-                           "direction as a line drawn through the wheels/axles "
-                           "(front wheel to rear wheel)? Just the name. Leave "
+                           "horizontal measurement's arrow runs from the front "
+                           "wheel to the back wheel (along the wheelbase, same "
+                           "side, nose to tail)? For a vehicle this should be "
+                           "\"Length\" by definition. Just the name. Leave "
                            "blank if this product has no wheels."),
         },
         "valid": {"type": "BOOLEAN"},
@@ -949,6 +1025,7 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
 
     horizontal_labels = [l for l in axis_labels if not l.startswith("Height")]
     expected_longest_name = None
+    expect_length_on_wheels = False
     magnitude_check = ""
     if len(horizontal_labels) >= 2:
         ordered = sorted(horizontal_labels, key=axis_label_magnitude, reverse=True)
@@ -959,7 +1036,24 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
             f"— judge this purely by looking at actual on-screen arrow length, not "
             f"by assuming which name should be longer."
         )
-        if is_vehicle:
+        length_label = next((l for l in horizontal_labels if l.startswith("Length")), None)
+        if is_vehicle and length_label:
+            # Name-based, not magnitude-based: "Length" must be the one
+            # anchored to the wheels, by definition, regardless of which
+            # number happens to be bigger — this is what actually held up
+            # in generation (see build_generation_prompt) after magnitude
+            # comparisons alone kept getting swapped on real vehicles.
+            expect_length_on_wheels = True
+            magnitude_check += (
+                f" This product is a wheeled vehicle, so ALSO report in "
+                f"wheel_direction_arrow_label which named measurement's arrow runs "
+                f"from the front wheel to the back wheel (along the wheelbase, "
+                f"same side, nose to tail) — this should be \"Length\" by "
+                f"definition for a vehicle. Judge this by the wheels' physical "
+                f"position, not by which arrow looks longer on screen — a real "
+                f"check got this backwards even when comparing apparent length."
+            )
+        elif is_vehicle:
             magnitude_check += (
                 f" This product is a wheeled vehicle, so ALSO report in "
                 f"wheel_direction_arrow_label which named measurement's arrow runs "
@@ -1033,12 +1127,18 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
         # into one holistic verdict let the logic silently fail even when
         # the underlying perception (if asked for directly) would show it.
         if expected_longest_name:
-            # Prefer the wheel-direction check for vehicles — "visually
-            # longest" proved unreliable under foreshortening even when
-            # asked for directly; the wheel landmark doesn't require a
-            # perspective judgment at all.
             wheel_reported = (parsed.get("wheel_direction_arrow_label") or "").strip()
-            if is_vehicle and wheel_reported:
+            if is_vehicle and expect_length_on_wheels and wheel_reported:
+                # Name-based check: "Length" must be the one on the wheels,
+                # by definition, regardless of magnitude — matches the
+                # generation-side instruction (see build_generation_prompt).
+                if wheel_reported.split()[0].lower() != "length":
+                    valid = False
+                    reason = (f"axis_swap_detected: model reported '{wheel_reported}' as "
+                             f"running along the wheels (front-to-back), but 'Length' is "
+                             f"defined as that measurement for a vehicle regardless of "
+                             f"which number is bigger. ({reason})")
+            elif is_vehicle and wheel_reported:
                 if wheel_reported.split()[0].lower() != expected_longest_name.lower():
                     valid = False
                     reason = (f"axis_swap_detected: model reported '{wheel_reported}' as "
@@ -1341,6 +1441,11 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
         axis_labels = compute_axis_labels(task["description"], task["specifications"])
         is_vehicle = is_vehicle_product(task["rule_category"], task["product_name"],
                                         task["description"], task["specifications"])
+        # Keep verification in sync with what the prompt actually asked
+        # for — vehicles get the side-profile 2-arrow layout (Breadth as
+        # text only, no arrow), so the verifier must check for 2 arrows,
+        # not 3, or it would flag a correct image as missing one.
+        axis_labels, _ = resolve_dimension_layout(axis_labels, is_vehicle)
     result = generate_image_with_verification(
         task["reference_url"], prompt, out_path, project_id, region, tokens, axis_labels,
         is_vehicle=is_vehicle)
