@@ -604,6 +604,17 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
                 "alongside it — none may cross, overlap, or be drawn on top of the "
                 "product itself. Do not add any extra arrow or line beyond these."
             )
+        # Requested on every dimension image, matching how real manufacturer
+        # spec-sheet photos commonly caveat printed measurements — covers
+        # small, expected manufacturing/rendering tolerance without it
+        # reading as a wrong-number defect.
+        dimension_note += (
+            "\n\nAlso add the small text \"Size may vary slightly\" once, in a "
+            "plain small gray font clearly smaller than the measurement "
+            "labels, in an empty corner of the image (e.g. bottom-right). It "
+            "must not overlap any arrow, measurement label, or the product "
+            "itself."
+        )
     # Every slot type: keep the whole product in frame — cropping at the
     # edges (e.g. a close-up "Feature" shot clipping the wheel) has shown up
     # in real output. Lifestyle specifically: no background blur/bokeh —
