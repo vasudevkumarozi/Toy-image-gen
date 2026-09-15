@@ -672,21 +672,33 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
             extra_rules += " " + FEATURE_STYLE_RULE
         extra_rules += " " + FEATURE_TEXT_LABEL_RULE
         if is_vehicle_product(category, product_name, description, specifications):
-            # FEATURE_TEXT_LABEL_RULE already names this exact failure (a
-            # mixer truck's "Free Wheel Mechanism" pointer landing on the
-            # drum instead of the wheels) as a generic warning, but it
-            # still recurred on a different real vehicle — the pointer
-            # landed on the window/pillar area instead of a wheel. Naming
-            # the failure wasn't enough; this spells out, unambiguously,
-            # which visible part of THIS product actually is the wheel.
+            # Structural fix, not another wording tweak — asking the model
+            # to pinpoint a small coordinate for a wheel-related label
+            # inside a full-vehicle shot has now failed 4 different ways
+            # across real vehicles (pointer landed on: a mixer drum, a
+            # window/pillar, a bumper/fender edge, a hood/headlight), each
+            # time after the previous exact failure was spelled out and
+            # forbidden by name. Reframing the ENTIRE shot as a close-up
+            # crop on one wheel — so the wheel is the dominant round object
+            # filling the frame, not a small part of a wide scene — removes
+            # the coordinate-guessing problem instead of asking for more
+            # precision at it.
             extra_rules += (
                 " If the feature you choose to highlight relates to the "
-                "wheels, axle, or rolling/suspension mechanism, the pointer "
-                "MUST land physically on one of the wheels themselves — the "
-                "round, rubber-tired components touching the ground at the "
-                "bottom of the vehicle — never on the window, pillar, door, "
-                "roof, or any body panel above the wheels, no matter how "
-                "visually close those areas are to the wheel from this angle."
+                "wheels, axle, or rolling/suspension mechanism: do NOT shoot "
+                "a full side or angled view of the whole vehicle for this "
+                "image. Instead, frame this ENTIRE shot as a tight close-up "
+                "crop centered on ONE wheel, with that wheel's tire and rim "
+                "filling at least 40% of the frame width — the rest of the "
+                "vehicle may be partially visible at the edges, softly out "
+                "of focus, or cropped off entirely, since this is a "
+                "close-up feature shot, not a full product shot. With the "
+                "wheel this large and dominant, there is no other round "
+                "part nearby it could be confused with — the label's "
+                "pointer/leader line must land on that same large wheel, "
+                "on the visible tire or rim itself, not on the wheel arch, "
+                "fender, bumper, hood, or any body panel at the edge of the "
+                "crop."
             )
     if any(k in image_type_lower for k in ("angle", "second", "rear", "back", "opposite")):
         extra_rules += " " + PACKAGING_LOGIC_RULE
