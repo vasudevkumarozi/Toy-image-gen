@@ -631,6 +631,42 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
                         f"the final image."
                     )
                 composition_note = ""
+                shape_note = ""
+                height_label_full = next((l for l in axis_labels if l.startswith("Height")), None)
+                if n == 3 and height_label_full and len(horizontal_labels) == 2:
+                    # The arrow-proportionality instruction alone wasn't
+                    # enough — a real image had the Height arrow measuring
+                    # LONGER on screen (930px) than the Length arrow (130px)
+                    # despite Length's real number (30) being 20x bigger
+                    # than Height's (1.5). The labels were on the correct
+                    # sides, but the box's actual rendered 3D SHAPE was
+                    # wrong (tall/thick instead of thin/flat) — arrows drawn
+                    # on top of a wrongly-proportioned box can't fix
+                    # anything. This states the real proportions explicitly
+                    # so the shape itself gets built correctly first.
+                    h_val = axis_label_magnitude(height_label_full)
+                    max_horizontal_val = max(axis_label_magnitude(l) for l in horizontal_labels)
+                    if h_val > 0 and max_horizontal_val >= h_val * 2:
+                        ratio = round(max_horizontal_val / h_val, 1)
+                        shape_note = (
+                            f" This product's real proportions: "
+                            f"{', '.join(axis_labels)} — its Height is about "
+                            f"{ratio}x SMALLER than its longest horizontal "
+                            f"measurement. The box's actual rendered 3D SHAPE "
+                            f"(not just its arrows) must reflect this: it is a "
+                            f"THIN, FLAT slab (like a slim board game or "
+                            f"picture-frame box) whose Height edge appears as "
+                            f"a narrow sliver — clearly the thinnest thing "
+                            f"visible in the photo, not a tall or thick-looking "
+                            f"box standing upright. A real image got the arrow "
+                            f"LABELS right but still rendered the box's thin "
+                            f"edge taking up most of the frame's height "
+                            f"(visually as if the box were tall and narrow) "
+                            f"while its actual long edges shrank to almost "
+                            f"nothing — that is wrong no matter how the "
+                            f"arrows are labeled; get the box's real shape "
+                            f"right first, then draw arrows that match it."
+                        )
                 if n == 3:
                     # Structural fix: a real box product was shot flat-on
                     # (frontal), so its Height (a small number, e.g.
@@ -681,7 +717,8 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
                     f"name describes (the Height arrow vertical along the product's actual "
                     f"height, the Length/Width/Breadth/Depth arrows along their own "
                     f"horizontal axes) — do not attach a label to the wrong axis or drop "
-                    f"any of the {n} listed measurements.{magnitude_note}{composition_note} "
+                    f"any of the {n} listed measurements.{magnitude_note}"
+                    f"{composition_note}{shape_note} "
                     f"A base that is wider at the back than the front (a common "
                     f"perspective effect) still has only ONE length and ONE breadth — do "
                     f"not draw the same measurement a second time from the opposite corner "
