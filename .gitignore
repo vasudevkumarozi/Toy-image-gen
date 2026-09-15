@@ -29,3 +29,7 @@ generated_images*/
 /products_6_images*.xlsx
 /run_*.xlsx
 /run_batch2_input.csv
+
+# Per-run working directories created by ui/app.py (uploaded input +
+# every step's output for that run) — regenerated each run, not source.
+/ui_runs/

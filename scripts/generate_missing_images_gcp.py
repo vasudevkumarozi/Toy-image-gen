@@ -265,8 +265,14 @@ FEATURE_TEXT_LABEL_RULE = (
     "specific feature or selling point of THIS exact product, taken only "
     "from the product facts given above (its description bullets or "
     "specification fields) — do not invent a feature that isn't "
-    "mentioned there, and make sure it matches whatever part this image "
-    "actually depicts. Keep the label short (a few words), clearly "
+    "mentioned there. The pointer must land on the part that ACTUALLY "
+    "performs that named function, not just a plausible-looking or "
+    "conveniently nearby spot — a real image labeled \"Free Wheel "
+    "Mechanism\" pointed at the mixer drum instead of the wheels/axle, "
+    "which is wrong no matter how correct the label text itself is. "
+    "Before placing each pointer, identify which specific visible part of "
+    "the product is physically responsible for that feature, and point "
+    "there specifically. Keep the label short (a few words), clearly "
     "legible, and set in a clean bold sans-serif font with good contrast "
     "against its background — polished and modern, like a real "
     "marketplace product-listing infographic, not handwritten."
@@ -281,6 +287,23 @@ INDIA_REPRESENTATION_RULE = (
     "in appearance. The home or setting should read as a realistic Indian "
     "household/room (nothing needs to be stereotyped or overly ornate — an "
     "ordinary, realistic Indian home is right)."
+)
+
+# A real lifestyle shot for a single die-cast truck (sold as "1 Model Mixer
+# Toy", nothing else) came back with a second, clearly-different toy
+# vehicle (an excavator) placed right next to it in the scene — a customer
+# glancing at that photo could reasonably think the excavator is included.
+# Generic, non-branded play props (blocks, cones, a rug) don't have this
+# problem since they don't look like a specific product being sold.
+NO_OTHER_PRODUCTS_RULE = (
+    "Do not add any other toy that looks like a distinct, separately "
+    "sellable product into this scene — no second vehicle, figure, playset, "
+    "or branded item that isn't THIS product. A customer must not be able "
+    "to look at this photo and think something extra comes in the box. "
+    "Generic, non-branded play props are fine and encouraged (building "
+    "blocks, a play rug, cones, a basket of unrelated household items) "
+    "since those clearly aren't part of what's being sold — the line to "
+    "not cross is anything that reads as its own specific toy/product."
 )
 
 # A real "Learning" scene (kids at a table) came back with the actual photo
@@ -451,6 +474,51 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
             # this spells out each named measurement individually rather
             # than trusting the model to keep an unlabeled triple straight.
             n = len(axis_labels)
+            horizontal_labels = [l for l in axis_labels if not l.startswith("Height")]
+            magnitude_note = ""
+            if len(horizontal_labels) >= 2:
+                ordered = sorted(horizontal_labels, key=axis_label_magnitude, reverse=True)
+                magnitude_note = (
+                    f" Among the horizontal measurements, \"{ordered[0]}\" is the "
+                    f"LARGEST number — its arrow must run along the visually LONGEST "
+                    f"horizontal edge of the product. \"{ordered[-1]}\" is the "
+                    f"SMALLEST — its arrow must run along the visually SHORTEST "
+                    f"horizontal edge, perpendicular to the longest one. A real "
+                    f"product came back with these two swapped (the bigger number "
+                    f"attached to the visually shorter edge and vice versa) — match "
+                    f"each arrow to its edge by actual visual proportion in the "
+                    f"reference image, not by assuming which name conventionally "
+                    f"goes where."
+                )
+                if is_vehicle_product(category, product_name, description, specifications):
+                    magnitude_note += (
+                        f" This is a wheeled vehicle: use the wheels as your "
+                        f"landmark rather than judging apparent length. The "
+                        f"wheels/axles run along the vehicle's real-world LENGTH "
+                        f"(nose to tail) — so \"{ordered[0]}\" (the larger "
+                        f"measurement) must be drawn along that same direction, "
+                        f"front wheel to rear wheel. \"{ordered[-1]}\" (the "
+                        f"smaller measurement) must be drawn across the narrow "
+                        f"front or back face, perpendicular to the wheels — "
+                        f"never along the wheelbase."
+                    )
+                # Real output still swapped these even with the instructions
+                # above (both for a vehicle and for a plain box) — adding a
+                # concrete self-check step, not just another way of stating
+                # the same rule, since asking the model to verify its own
+                # draft before finalizing is a different mechanism than
+                # asking it to get the judgment right on the first pass.
+                magnitude_note += (
+                    f" Self-check before finalizing this image: look at the two "
+                    f"horizontal arrows you have actually drawn and compare their "
+                    f"pixel lengths on the page. If the arrow labeled "
+                    f"\"{ordered[-1]}\" (the smaller number) is drawn LONGER on "
+                    f"the page than the arrow labeled \"{ordered[0]}\" (the "
+                    f"larger number), that is backwards — swap which label is on "
+                    f"which arrow (keep the arrows themselves where they are, "
+                    f"just correct which text goes on which one) before producing "
+                    f"the final image."
+                )
             dimension_note += (
                 f"\n\nArrow rules: draw EXACTLY {n} arrows on this entire image, one "
                 f"for each of these named measurements and nothing else — "
@@ -465,16 +533,16 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
                 f"name describes (the Height arrow vertical along the product's actual "
                 f"height, the Length/Width/Breadth/Depth arrows along their own "
                 f"horizontal axes) — do not attach a label to the wrong axis or drop "
-                f"any of the {n} listed measurements. A base that is wider at the back "
-                f"than the front (a common perspective effect) still has only ONE "
-                f"length and ONE breadth — do not draw the same measurement a second "
-                f"time from the opposite corner or the far edge just because it is "
-                f"visible there too; pick ONE corner of the product and draw all "
-                f"{n} arrows radiating from measurements anchored at or near that "
-                f"single corner only. Every arrow and its label must start and end in "
-                f"the empty background space OUTSIDE the product's outline, alongside "
-                f"it — none may cross, overlap, touch, or be drawn on top of the "
-                f"on top of the product itself or anything attached to it."
+                f"any of the {n} listed measurements.{magnitude_note} A base that is "
+                f"wider at the back than the front (a common perspective effect) "
+                f"still has only ONE length and ONE breadth — do not draw the same "
+                f"measurement a second time from the opposite corner or the far edge "
+                f"just because it is visible there too; pick ONE corner of the "
+                f"product and draw all {n} arrows radiating from measurements "
+                f"anchored at or near that single corner only. Every arrow and its "
+                f"label must start and end in the empty background space OUTSIDE the "
+                f"product's outline, alongside it — none may cross, overlap, touch, "
+                f"or be drawn on top of the product itself or anything attached to it."
             )
         else:
             dimension_note += (
@@ -498,7 +566,7 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
     if any(k in image_type_lower for k in ("lifestyle", "learning", "skills", "action")):
         extra_rules += " " + FULL_BLEED_RULE
     if "lifestyle" in image_type_lower:
-        extra_rules += " " + FOCUS_RULE + " " + INDIA_REPRESENTATION_RULE
+        extra_rules += " " + FOCUS_RULE + " " + INDIA_REPRESENTATION_RULE + " " + NO_OTHER_PRODUCTS_RULE
         # A small RC car came back looking oversized next to the child
         # holding it — a Lifestyle shot has no reference-image anchor for
         # scale the way a straight product photo does (the model is
@@ -745,7 +813,34 @@ def generate_image(reference_url: str, prompt: str, out_path: str,
     return {"status": f"failed: {last_error}"}
 
 
-AXIS_LABEL_RE = re.compile(r"(Length|Width|Breadth|Height|Depth) [\d.]+\s*\S*")
+# Non-capturing group is deliberate: .findall() with exactly one capturing
+# group returns ONLY that group's text, not the full match — which silently
+# turned every axis_labels entry into a bare name ("Length") instead of the
+# full "Length 7.5 cm", dropping the numbers everywhere this list is used
+# (the arrow-count enumeration, and the magnitude-matching check below).
+AXIS_LABEL_RE = re.compile(r"(?:Length|Width|Breadth|Height|Depth) [\d.]+\s*[a-zA-Z]*")
+
+
+def axis_label_magnitude(label: str) -> float:
+    """Numeric value out of a label like "Length 7.5 cm" -> 7.5. Shared by
+    build_generation_prompt (to tell the model which named measurement
+    should land on the visually longer vs shorter edge) and
+    verify_dimension_image (to check it actually did)."""
+    m = re.search(r"[\d.]+", label)
+    return float(m.group()) if m else 0.0
+
+
+VEHICLE_KEYWORDS = ("cars & rc", "rc toy", "ride-on", "ride on", "tricycle", "wheel")
+
+
+def is_vehicle_product(category: str, product_name: str, description: str,
+                       specifications: str) -> bool:
+    """Whether the wheel-landmark dimension rule applies — shared by
+    build_generation_prompt and process_slot_task (which passes the result
+    to generate_image_with_verification) so both use the exact same
+    detection."""
+    haystack = f"{category} {product_name} {description} {specifications}".lower()
+    return any(k in haystack for k in VEHICLE_KEYWORDS)
 
 
 def compute_axis_labels(description: str, specifications: str) -> list:
@@ -775,10 +870,48 @@ DIMENSION_VERIFY_SCHEMA = {
         "arrows_found": {
             "type": "ARRAY",
             "items": {"type": "STRING"},
-            "description": ("One entry per arrow anywhere in the image, however small "
-                           "or short — format: '<label or UNLABELED>: <exact location, "
-                           "e.g. \"both endpoints in blank background to the right\" or "
-                           "\"crosses the red seat in the center\">'"),
+            "description": ("One entry per MEASUREMENT arrow we added anywhere in the "
+                           "image, however small or short — format: '<label or "
+                           "UNLABELED>: <exact location, e.g. \"both endpoints in "
+                           "blank background to the right\" or \"crosses the red seat "
+                           "in the center\">'. Do NOT include arrows, curved lines, or "
+                           "icons that are printed as part of the product's OWN "
+                           "packaging artwork/logo (e.g. a decorative arrow icon "
+                           "printed on the box itself) — a real check flagged a valid "
+                           "image as broken because it mistook the box's own printed "
+                           "logo arrow for an extra measurement arrow. Only count "
+                           "arrows that were added on top of the product photo as a "
+                           "measurement callout."),
+        },
+        # A separate, purely perceptual field rather than folding this into
+        # the model's own "valid" judgment — a real check reported valid=
+        # true on an image where the bigger number was visibly on the
+        # shorter edge, because combining "perceive which edge is longer"
+        # and "apply the swap-check logic" in one holistic judgment let the
+        # logic step silently fail even when the raw perception would have
+        # been fine. Asking only for the observable fact here, then
+        # comparing it against the expected order in plain Python (see
+        # verify_dimension_image), is more reliable than trusting the
+        # model to also get the comparison right.
+        "longest_horizontal_arrow_label": {
+            "type": "STRING",
+            "description": ("Which named horizontal measurement's arrow is drawn "
+                           "visually LONGEST on the page (ignore Height) — just the "
+                           "name, e.g. 'Length'. Look at actual on-screen arrow "
+                           "length, not which number is bigger."),
+        },
+        # For wheeled vehicles specifically: "visually longest" turned out
+        # to be an unreliable judgment call under 3/4-angle foreshortening
+        # (a real check still got this backwards even when asked directly).
+        # Anchoring to the wheels — a concrete, unambiguous landmark that
+        # doesn't require any perspective judgment — is more reliable.
+        "wheel_direction_arrow_label": {
+            "type": "STRING",
+            "description": ("Only for a wheeled vehicle product: which named "
+                           "horizontal measurement's arrow runs in the SAME "
+                           "direction as a line drawn through the wheels/axles "
+                           "(front wheel to rear wheel)? Just the name. Leave "
+                           "blank if this product has no wheels."),
         },
         "valid": {"type": "BOOLEAN"},
         "arrow_count": {"type": "INTEGER"},
@@ -789,7 +922,8 @@ DIMENSION_VERIFY_SCHEMA = {
 
 
 def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: str,
-                          region: str, tokens: VertexTokenProvider) -> dict:
+                          region: str, tokens: VertexTokenProvider,
+                          is_vehicle: bool = False) -> dict:
     """Checks a generated dimension image against its own ground truth — the
     exact set of named measurements it was asked to draw — instead of
     trusting the generation call got it right. Real output repeatedly came
@@ -805,17 +939,47 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
     """
     names = [label.split()[0] for label in axis_labels]
     n = len(names)
+
+    horizontal_labels = [l for l in axis_labels if not l.startswith("Height")]
+    expected_longest_name = None
+    magnitude_check = ""
+    if len(horizontal_labels) >= 2:
+        ordered = sorted(horizontal_labels, key=axis_label_magnitude, reverse=True)
+        expected_longest_name = ordered[0].split()[0]
+        magnitude_check = (
+            f" Separately, report which of the horizontal measurements' arrows "
+            f"is drawn visually longest on the page in longest_horizontal_arrow_label "
+            f"— judge this purely by looking at actual on-screen arrow length, not "
+            f"by assuming which name should be longer."
+        )
+        if is_vehicle:
+            magnitude_check += (
+                f" This product is a wheeled vehicle, so ALSO report in "
+                f"wheel_direction_arrow_label which named measurement's arrow runs "
+                f"in the same direction as the wheels (front wheel to rear wheel) "
+                f"— this is a more reliable check than apparent length for a "
+                f"vehicle shot at an angle, since foreshortening can make the "
+                f"true longer edge look shorter on screen."
+            )
+
     prompt = (
         f"This product image is supposed to show exactly {n} measurement "
         f"arrows for these named dimensions, each appearing exactly once: "
         f"{', '.join(names)}. "
         f"First, scan the ENTIRE image very carefully — including the "
         f"interior and center of the product, not just its outer edges "
-        f"and background — and list EVERY arrow or double-headed line you "
-        f"can find in arrows_found, no matter how short, thin, or easy to "
-        f"miss at a glance; a short unlabeled arrow crossing the middle of "
-        f"the product is a real, common defect here and must not be "
-        f"overlooked. Then, using that list, check all of the following: "
+        f"and background — and list EVERY measurement arrow or double-headed "
+        f"line you can find in arrows_found, no matter how short, thin, or "
+        f"easy to miss at a glance; a short unlabeled arrow crossing the "
+        f"middle of the product is a real, common defect here and must not "
+        f"be overlooked. IMPORTANT — do not confuse this with a decorative "
+        f"arrow, swoosh, or icon that is part of the product's OWN printed "
+        f"packaging design/logo (e.g. a printed arrow icon on the box "
+        f"itself, already present before any measurement was added) — a "
+        f"real check wrongly flagged a correct image as broken because it "
+        f"mistook the box's own printed logo arrow for an extra measurement "
+        f"arrow; only count arrows that were added ON TOP of the product "
+        f"photo as a callout. Then, using that list, check all of the following: "
         f"(1) there are EXACTLY {n} arrows total, not more, not fewer; "
         f"(2) each of {', '.join(names)} appears exactly once — none "
         f"missing, none duplicated (e.g. two arrows both for the same "
@@ -823,8 +987,8 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
         f"duplicate); (3) no arrow crosses, overlaps, or touches the "
         f"product itself or anything attached to it (like a rope, strap, "
         f"or handle) — every arrow must lie entirely in empty background "
-        f"space. Set valid=true only if ALL of these hold for every arrow "
-        f"in arrows_found."
+        f"space. Set valid=true only if (1)-(3) hold for every arrow in "
+        f"arrows_found.{magnitude_check}"
     )
     endpoint = (
         f"https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}"
@@ -852,7 +1016,35 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
         if text is None:
             return {"valid": True, "reason": "verification_error: no_text_in_response"}
         parsed = json.loads(text)
-        return {"valid": bool(parsed.get("valid")), "reason": parsed.get("reason", "")}
+        valid = bool(parsed.get("valid"))
+        reason = parsed.get("reason", "")
+        # Deterministic override: don't trust the model's own combined
+        # judgment for the swap-check — compare its raw perceptual report
+        # against the expected order in plain code. A real check reported
+        # valid=true while the bigger number sat on the visually shorter
+        # edge, because folding "perceive" + "apply this specific logic"
+        # into one holistic verdict let the logic silently fail even when
+        # the underlying perception (if asked for directly) would show it.
+        if expected_longest_name:
+            # Prefer the wheel-direction check for vehicles — "visually
+            # longest" proved unreliable under foreshortening even when
+            # asked for directly; the wheel landmark doesn't require a
+            # perspective judgment at all.
+            wheel_reported = (parsed.get("wheel_direction_arrow_label") or "").strip()
+            if is_vehicle and wheel_reported:
+                if wheel_reported.split()[0].lower() != expected_longest_name.lower():
+                    valid = False
+                    reason = (f"axis_swap_detected: model reported '{wheel_reported}' as "
+                             f"running along the wheels, but '{expected_longest_name}' has "
+                             f"the larger number and should align with the wheels. ({reason})")
+            else:
+                reported = (parsed.get("longest_horizontal_arrow_label") or "").strip()
+                if reported and reported.split()[0].lower() != expected_longest_name.lower():
+                    valid = False
+                    reason = (f"axis_swap_detected: model reported '{reported}' as the "
+                             f"visually longest horizontal arrow, but '{expected_longest_name}' "
+                             f"has the larger number and should be longest. ({reason})")
+        return {"valid": valid, "reason": reason}
     except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError) as e:
         return {"valid": True, "reason": f"verification_error: {e}"}
 
@@ -862,7 +1054,7 @@ MAX_GENERATION_ATTEMPTS = 3
 
 def generate_image_with_verification(reference_url: str, prompt: str, out_path: str,
                                      project_id: str, region: str, tokens: VertexTokenProvider,
-                                     axis_labels: list) -> dict:
+                                     axis_labels: list, is_vehicle: bool = False) -> dict:
     """Wraps generate_image with the verify-and-retry loop: for a slot with
     checkable ground truth (axis_labels non-empty), regenerate up to
     MAX_GENERATION_ATTEMPTS (3, capped — real cost per attempt) total times
@@ -885,7 +1077,8 @@ def generate_image_with_verification(reference_url: str, prompt: str, out_path: 
             return result
         with open(out_path, "rb") as f:
             image_bytes = f.read()
-        verdict = verify_dimension_image(image_bytes, axis_labels, project_id, region, tokens)
+        verdict = verify_dimension_image(image_bytes, axis_labels, project_id, region, tokens,
+                                        is_vehicle=is_vehicle)
         if verdict["valid"]:
             return result
         last_result = {"status": f"generated_unverified: {verdict['reason']}"}
@@ -1136,10 +1329,14 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
     # repeatedly shown a dropped/duplicated measurement or a stray arrow
     # even with an explicit prompt.
     axis_labels = []
+    is_vehicle = False
     if "size" in image_type_lower or "dimension" in image_type_lower:
         axis_labels = compute_axis_labels(task["description"], task["specifications"])
+        is_vehicle = is_vehicle_product(task["rule_category"], task["product_name"],
+                                        task["description"], task["specifications"])
     result = generate_image_with_verification(
-        task["reference_url"], prompt, out_path, project_id, region, tokens, axis_labels)
+        task["reference_url"], prompt, out_path, project_id, region, tokens, axis_labels,
+        is_vehicle=is_vehicle)
     status = result["status"]
     generated = status == "generated" or status.startswith("generated_unverified")
     gcp_link = ""
