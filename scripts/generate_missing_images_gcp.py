@@ -671,6 +671,23 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
             # edge. This targets the actual cause: fewer items, more room.
             extra_rules += " " + FEATURE_STYLE_RULE
         extra_rules += " " + FEATURE_TEXT_LABEL_RULE
+        if is_vehicle_product(category, product_name, description, specifications):
+            # FEATURE_TEXT_LABEL_RULE already names this exact failure (a
+            # mixer truck's "Free Wheel Mechanism" pointer landing on the
+            # drum instead of the wheels) as a generic warning, but it
+            # still recurred on a different real vehicle — the pointer
+            # landed on the window/pillar area instead of a wheel. Naming
+            # the failure wasn't enough; this spells out, unambiguously,
+            # which visible part of THIS product actually is the wheel.
+            extra_rules += (
+                " If the feature you choose to highlight relates to the "
+                "wheels, axle, or rolling/suspension mechanism, the pointer "
+                "MUST land physically on one of the wheels themselves — the "
+                "round, rubber-tired components touching the ground at the "
+                "bottom of the vehicle — never on the window, pillar, door, "
+                "roof, or any body panel above the wheels, no matter how "
+                "visually close those areas are to the wheel from this angle."
+            )
     if any(k in image_type_lower for k in ("angle", "second", "rear", "back", "opposite")):
         extra_rules += " " + PACKAGING_LOGIC_RULE
 
