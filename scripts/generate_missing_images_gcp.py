@@ -527,7 +527,34 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
                 n = len(axis_labels)
                 horizontal_labels = [l for l in axis_labels if not l.startswith("Height")]
                 magnitude_note = ""
-                if len(horizontal_labels) >= 2:
+                # For the common non-vehicle 3D box case (Length + Breadth +
+                # Height), a real image still swapped Length/Breadth even
+                # with the visual-proportion self-check below in the prompt
+                # — judging "which diagonal edge looks longer" is exactly
+                # the perceptual task that keeps failing. Replacing it with
+                # a fixed LEFT/RIGHT positional rule removes the judgment
+                # call entirely, the same structural approach that fixed
+                # the vehicle wheel-landmark case: horizontal_labels is in
+                # the manufacturer's own Length-then-Breadth/Width order
+                # (see _label_dimension_value), so left/right is a stable,
+                # unambiguous convention rather than a guess.
+                use_positional_convention = (n == 3 and not is_vehicle
+                                            and len(horizontal_labels) == 2)
+                if use_positional_convention:
+                    left_label, right_label = horizontal_labels[0], horizontal_labels[1]
+                    magnitude_note = (
+                        f" Assign the two horizontal arrows by FIXED POSITION, "
+                        f"not by judging which edge looks longer (a real image "
+                        f"swapped these even when told to match by visual "
+                        f"proportion): the diagonal arrow radiating toward the "
+                        f"LEFT side of the frame from the near corner is always "
+                        f"\"{left_label}\", and the one radiating toward the "
+                        f"RIGHT side is always \"{right_label}\" — use this "
+                        f"left/right rule to decide which label goes on which "
+                        f"arrow, regardless of which one looks longer or "
+                        f"shorter on screen."
+                    )
+                elif len(horizontal_labels) >= 2:
                     ordered = sorted(horizontal_labels, key=axis_label_magnitude, reverse=True)
                     magnitude_note = (
                         f" Among the horizontal measurements, \"{ordered[0]}\" is the "
@@ -651,6 +678,20 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
             "labels, in an empty corner of the image (e.g. bottom-right). It "
             "must not overlap any arrow, measurement label, or the product "
             "itself."
+        )
+        # A real image left true blank white bars along the top and bottom
+        # of the canvas — the product+arrows only filled a band in the
+        # middle, not the whole square canvas. Distinct from FULL_BLEED_RULE
+        # (that one's about scene photos with a floor/room); this is about a
+        # plain product shot not being scaled to actually use the frame.
+        dimension_note += (
+            "\n\nFill the ENTIRE image canvas edge to edge — the product, its "
+            "arrows, and its background must reach all four edges, with no "
+            "blank white or empty bars/borders added at the top, bottom, or "
+            "sides. Scale and position the whole composition (product + "
+            "arrows + labels) to actually use the full frame — do not shrink "
+            "it down into a smaller banded region in the middle of the "
+            "canvas and leave the rest blank."
         )
     # Every slot type: keep the whole product in frame — cropping at the
     # edges (e.g. a close-up "Feature" shot clipping the wheel) has shown up
@@ -1073,6 +1114,19 @@ DIMENSION_VERIFY_SCHEMA = {
                            "\"Length\" by definition. Just the name. Leave "
                            "blank if this product has no wheels."),
         },
+        # Position, not magnitude — matches the generation-side left/right
+        # convention for the box case (build_generation_prompt), since
+        # judging "which edge looks longer" is the exact perceptual task
+        # that kept failing even with an explicit self-check in the prompt.
+        "left_arrow_label": {
+            "type": "STRING",
+            "description": ("Only for a non-vehicle product shot at a 3/4 "
+                           "corner angle with two horizontal arrows: which "
+                           "named measurement's arrow points toward the LEFT "
+                           "side of the frame from the near corner? Judge by "
+                           "on-screen position (left vs right), not by which "
+                           "one looks longer. Leave blank if not applicable."),
+        },
         # Real output rendered "Breadeth" instead of "Breadth" (and, in an
         # earlier image, "Heglt" instead of "Height") — a spelling glitch
         # in the model's own text rendering, not a prompt-wording problem,
@@ -1122,9 +1176,26 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
 
     horizontal_labels = [l for l in axis_labels if not l.startswith("Height")]
     expected_longest_name = None
+    expected_left_name = None
     expect_length_on_wheels = False
     magnitude_check = ""
-    if len(horizontal_labels) >= 2:
+    # Mirrors build_generation_prompt's use_positional_convention exactly —
+    # for the plain box case, generation is now told to place Length/Breadth
+    # by fixed LEFT/RIGHT position rather than by visual magnitude, so
+    # verification has to check the SAME thing it was actually told to do,
+    # not the old magnitude comparison (which would now flag a correctly
+    # generated image as wrong just because a small box happens to look
+    # wider than it is long from this angle).
+    use_positional_convention = (n == 3 and not is_vehicle and len(horizontal_labels) == 2)
+    if use_positional_convention:
+        expected_left_name = horizontal_labels[0].split()[0]
+        magnitude_check = (
+            f" Separately, report in left_arrow_label which named horizontal "
+            f"measurement's arrow points toward the LEFT side of the frame "
+            f"from the near corner — judge this purely by on-screen position "
+            f"(left vs right), not by which arrow looks longer."
+        )
+    elif len(horizontal_labels) >= 2:
         ordered = sorted(horizontal_labels, key=axis_label_magnitude, reverse=True)
         expected_longest_name = ordered[0].split()[0]
         magnitude_check = (
@@ -1232,6 +1303,14 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
         # edge, because folding "perceive" + "apply this specific logic"
         # into one holistic verdict let the logic silently fail even when
         # the underlying perception (if asked for directly) would show it.
+        if expected_left_name:
+            left_reported = (parsed.get("left_arrow_label") or "").strip()
+            if left_reported and left_reported.split()[0].lower() != expected_left_name.lower():
+                valid = False
+                reason = (f"axis_swap_detected: model reported '{left_reported}' as the "
+                         f"arrow on the LEFT side of the frame, but '{expected_left_name}' "
+                         f"is defined as the left-side arrow by our fixed left/right "
+                         f"convention regardless of which one looks longer. ({reason})")
         if expected_longest_name:
             wheel_reported = (parsed.get("wheel_direction_arrow_label") or "").strip()
             if is_vehicle and expect_length_on_wheels and wheel_reported:
