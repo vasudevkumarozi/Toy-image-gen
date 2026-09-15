@@ -93,6 +93,7 @@ from pipeline_lib import (
     extract_dimensions_from_description,
     is_battery_operated,
     get_image_bytes,
+    parse_description_fields,
     parse_slot_map,
     run_concurrent,
     slugify,
@@ -1033,8 +1034,22 @@ def axis_label_magnitude(label: str) -> float:
 
 VEHICLE_KEYWORDS = ("cars & rc", "rc toy", "ride-on", "ride on", "tricycle", "wheel")
 
-MULTIPIECE_KEYWORDS = ("puzzle", "block set", "building block", "peg puzzle",
-                       "sound puzzle", "stacking", "knobbed", "cylinder block")
+MULTIPIECE_KEYWORDS = (
+    # Puzzles / building sets — the original real example (a peg puzzle).
+    "puzzle", "block set", "building block", "peg puzzle", "sound puzzle",
+    "stacking", "knobbed", "cylinder block",
+    # Pretend-play "set" toys where the natural photo is many small loose
+    # pieces spread out — cooking utensils, makeup/vanity, tools, tea sets,
+    # doctor kits, etc. — clarified as the actual intended scope: ANY
+    # product whose components would otherwise be photographed scattered,
+    # not puzzles specifically.
+    "kitchen set", "cooking set", "cookware", "utensil", "tea set",
+    "tableware", "dinner set", "makeup", "cosmetic", "vanity", "beauty set",
+    "tool set", "tool kit", "toolkit", "doctor set", "doctor kit",
+    "medical kit", "jewelry making", "craft kit", "art set", "art kit",
+    "accessory set", "grooming set", "grocery set", "market set",
+    "tea party",
+)
 
 
 def is_boxed_multipiece_product(category: str, product_name: str, description: str,
@@ -1043,13 +1058,23 @@ def is_boxed_multipiece_product(category: str, product_name: str, description: s
     packaging box rather than the assembled/open product. A real dimension
     image for a peg puzzle showed the board with its wooden pegs placed in
     their slots at an angle — accurate to how the product looks in use, but
-    the user wants the closed box for this category instead, since an
-    open/assembled multi-piece product reads as "scattered" rather than a
-    clean, unambiguous shelf-ready size reference. Real product data for
-    this category rarely states an exact piece count in text, so this
-    matches on keyword alone rather than requiring a "N pieces" pattern."""
+    the user wants the closed box for this whole category of product
+    instead (explicitly: not just puzzles — any product with many small
+    loose components, like cooking-utensil or makeup sets), since an
+    open/scattered multi-piece product reads as messy rather than a clean,
+    unambiguous shelf-ready size reference. Real product data for this
+    category rarely states an exact piece count in text, so this matches
+    on keyword alone rather than requiring a "N pieces" pattern."""
     haystack = f"{category} {product_name} {description} {specifications}".lower()
-    return any(k in haystack for k in MULTIPIECE_KEYWORDS)
+    if any(k in haystack for k in MULTIPIECE_KEYWORDS):
+        return True
+    # General fallback beyond the keyword list: a "Contents" field listing
+    # several distinct, comma-separated items (e.g. "1 Pan, 2 Plates, 3
+    # Cups, 1 Spoon") is itself evidence of a multi-piece set, regardless
+    # of what the product happens to be called.
+    fields = {**parse_description_fields(description), **parse_description_fields(specifications)}
+    contents = fields.get("contents", "")
+    return contents.count(",") >= 2
 
 
 def is_vehicle_product(category: str, product_name: str, description: str,
