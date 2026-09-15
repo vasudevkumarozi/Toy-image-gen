@@ -101,10 +101,17 @@ from pipeline_lib import (
     write_status,
 )
 
-# "Nano Banana 2" (Gemini 3.1 Flash Image) - good cost/quality balance for
-# bulk catalog work. Swap to "gemini-3-pro-image" for higher fidelity on a
-# smaller batch (more expensive per image).
-MODEL_ID = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3.1-flash-image")
+# "gemini-3.1-flash-image" ("Nano Banana 2") is NOT enabled in the
+# `ozitech` GCP project — confirmed via a live 404 ("Publisher model ...
+# was not found") both from the CLI and, once more, from a real UI run
+# that had no manual override set. Every CLI invocation all session long
+# worked around this with an ad-hoc `export GEMINI_IMAGE_MODEL=...`
+# that was never written back here or into .env, so anything that didn't
+# know about that undocumented step (like the UI, or anyone else running
+# this fresh) hit the same 404. gemini-2.5-flash-image is the model
+# actually verified working in this project — that has to be the
+# default, not an override you have to remember.
+MODEL_ID = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 MAX_RETRIES = 3
 # Worth another attempt: throttling, transient backend faults, and a stale
 # token (retried once after a forced refresh). Everything else — 400 bad
