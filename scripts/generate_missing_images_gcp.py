@@ -570,6 +570,43 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
                         f"just correct which text goes on which one) before producing "
                         f"the final image."
                     )
+                composition_note = ""
+                if n == 3:
+                    # Structural fix: a real box product was shot flat-on
+                    # (frontal), so its Height (a small number, e.g.
+                    # 1.5 cm) was drawn as a tall vertical arrow the exact
+                    # same on-screen length as Breadth (a much bigger
+                    # number, e.g. 22 cm) — visually nonsensical even
+                    # though both labels were individually correct. A
+                    # correct real example used a 3/4 corner perspective
+                    # (both ground-plane edges visible, receding from one
+                    # near corner) where arrow lengths naturally track
+                    # real proportions. Mandating that composition, plus
+                    # an explicit proportionality rule, rather than just
+                    # asking for correct labels.
+                    composition_note = (
+                        f" Camera angle: photograph this at a 3/4 CORNER "
+                        f"perspective, not a flat frontal shot — position the "
+                        f"camera so ONE bottom corner of the product is "
+                        f"closest to the viewer, with both adjacent bottom "
+                        f"edges receding away from that corner at an angle "
+                        f"(like a classic product-dimension diagram, not a "
+                        f"straight-on catalog photo). Draw the two horizontal "
+                        f"arrows (Length and Breadth/Width) as diagonal arrows "
+                        f"radiating from that same near corner, each running "
+                        f"along its own visible ground-plane edge; draw the "
+                        f"Height arrow as a separate vertical arrow at that "
+                        f"same corner. Critically, each arrow's ON-SCREEN "
+                        f"length must be visually proportional to its "
+                        f"real-world number, consistent with the other arrows "
+                        f"in this same image — the arrow for a larger number "
+                        f"must look longer on the page than the arrow for a "
+                        f"smaller number. A short real dimension (like a thin "
+                        f"box's 1.5 cm height) must get a visibly SHORT arrow, "
+                        f"never the same on-screen length as a much larger "
+                        f"dimension just because both happen to be drawn "
+                        f"vertically or from the same corner."
+                    )
                 dimension_note += (
                     f"\n\nArrow rules: draw EXACTLY {n} arrows on this entire image, one "
                     f"for each of these named measurements and nothing else — "
@@ -584,12 +621,12 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
                     f"name describes (the Height arrow vertical along the product's actual "
                     f"height, the Length/Width/Breadth/Depth arrows along their own "
                     f"horizontal axes) — do not attach a label to the wrong axis or drop "
-                    f"any of the {n} listed measurements.{magnitude_note} A base that is "
-                    f"wider at the back than the front (a common perspective effect) "
-                    f"still has only ONE length and ONE breadth — do not draw the same "
-                    f"measurement a second time from the opposite corner or the far edge "
-                    f"just because it is visible there too; pick ONE corner of the "
-                    f"product and draw all {n} arrows radiating from measurements "
+                    f"any of the {n} listed measurements.{magnitude_note}{composition_note} "
+                    f"A base that is wider at the back than the front (a common "
+                    f"perspective effect) still has only ONE length and ONE breadth — do "
+                    f"not draw the same measurement a second time from the opposite corner "
+                    f"or the far edge just because it is visible there too; pick ONE corner "
+                    f"of the product and draw all {n} arrows radiating from measurements "
                     f"anchored at or near that single corner only. Every arrow and its "
                     f"label must start and end in the empty background space OUTSIDE the "
                     f"product's outline, alongside it — none may cross, overlap, touch, "
