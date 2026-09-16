@@ -8,6 +8,20 @@ step (backed by the same status.json files the pipeline already writes
 for unattended VM runs), and a clear red stop on the first failed step
 instead of silently continuing.
 
+The actual pipeline run is a fully DETACHED background process
+(scripts/run_pipeline_all.py, launched with start_new_session=True) —
+NOT something that runs inside this Streamlit script's own execution.
+A real run was silently abandoned after step 2 when the browser tab's
+SSH tunnel dropped: the step-2 subprocess had already finished cleanly,
+but the UI's own script execution (which was sequencing steps 1-4
+in-line) got torn down before it reached step 3, and step 3 never
+started. Because the run is now a separate OS process whose parent is
+init, not Streamlit, it survives regardless of what happens to any
+browser tab, tunnel, or session — and every run's progress lives on
+disk (pipeline_status.json + the same per-step *.status.json files),
+so reopening the page later shows the real current state instead of a
+blank "nothing has ever run" screen.
+
 This is meant to be run BOTH locally (to sanity-check the pipeline before
 ever touching the deploy instance) and later on the instance itself, so
 "does this actually work" has a UI answer, not just a terminal you have
@@ -16,16 +30,12 @@ to SSH into and tail.
 Run it with:
     streamlit run ui/app.py
 """
-# Defers annotation evaluation so `str | None` below doesn't hard-require
-# Python 3.10+ — the deploy instance's base image isn't guaranteed to be
-# on a version that supports PEP 604 syntax natively.
 from __future__ import annotations
 
 import json
 import os
 import subprocess
 import sys
-import threading
 import time
 import uuid
 from datetime import datetime
@@ -37,88 +47,25 @@ from dotenv import load_dotenv
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SCRIPTS_DIR = REPO_ROOT / "scripts"
-RULES_PATH = REPO_ROOT / "rules" / "toys_rule_master.json"
 RUNS_DIR = REPO_ROOT / "ui_runs"
 RUNS_DIR.mkdir(exist_ok=True)
 
-# Loaded once at import time (Streamlit re-executes this file on every
-# interaction, but load_dotenv is cheap and idempotent) — this is what
-# lets the UI process see OZI_API_KEY / GCP_PROJECT_ID / etc. without
-# needing the `set -a; source .env; set +a` shell dance every script here
-# otherwise relies on, since Streamlit isn't launched through that shell.
 load_dotenv(REPO_ROOT / ".env")
 
 st.set_page_config(page_title="OZi Toys Image Pipeline", layout="wide")
 
-
-def run_step(cmd: list, status_json_path: str | None, container) -> tuple:
-    """Runs cmd as a subprocess inside `container` (an st.status(...) block),
-    streaming stdout live and — if status_json_path is given — polling it
-    for a progress bar. Returns (success, full_log_text).
-
-    Log reading happens on a background thread so the progress bar still
-    refreshes every ~1s even during a long gap between printed lines (the
-    generate step can go 30-70s between "[n/total] done" prints once
-    dimension-image retries are involved) — polling only inside a blocking
-    readline() loop would freeze the progress bar during exactly those
-    gaps.
-    """
-    log_lines: list = []
-    log_lock = threading.Lock()
-
-    process = subprocess.Popen(
-        cmd, cwd=str(REPO_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1, env=os.environ.copy(),
-    )
-
-    def reader():
-        assert process.stdout is not None
-        for line in process.stdout:
-            with log_lock:
-                log_lines.append(line.rstrip("\n"))
-
-    reader_thread = threading.Thread(target=reader, daemon=True)
-    reader_thread.start()
-
-    log_placeholder = container.empty()
-    progress_placeholder = container.empty()
-
-    while process.poll() is None or reader_thread.is_alive():
-        with log_lock:
-            text = "\n".join(log_lines[-300:])
-        log_placeholder.code(text or "(waiting for output...)", language="text")
-        if status_json_path and os.path.exists(status_json_path):
-            try:
-                with open(status_json_path, encoding="utf-8") as f:
-                    data = json.load(f)
-                total = data.get("total", 0)
-                done = data.get("done", 0)
-                if total:
-                    counts = {k: v for k, v in data.items()
-                             if k not in ("total", "done", "started_at",
-                                         "updated_at", "finished_at")}
-                    counts_str = ", ".join(f"{k}={v}" for k, v in counts.items() if v)
-                    progress_placeholder.progress(
-                        min(done / total, 1.0),
-                        text=f"{done}/{total} — {counts_str}" if counts_str else f"{done}/{total}",
-                    )
-            except (json.JSONDecodeError, OSError):
-                pass
-        if process.poll() is not None and not reader_thread.is_alive():
-            break
-        time.sleep(1.0)
-
-    returncode = process.wait()
-    with log_lock:
-        full_log = "\n".join(log_lines)
-    return returncode == 0, full_log
+STAGE_LABELS = {
+    "fetch": ("Step 1/4 — Fetching product details", "products_detail.csv"),
+    "classify": ("Step 2/4 — Classifying existing images", "classification_result.csv"),
+    "generate": ("Step 3/4 — Generating missing images", "final_output.xlsx"),
+    "summary": ("Step 4/4 — Building the final summary sheet", None),
+    "done": ("Pipeline complete", None),
+    "failed": ("Pipeline failed", None),
+}
+STAGE_ORDER = ["fetch", "classify", "generate", "summary", "done"]
 
 
 def env_check() -> dict:
-    """Mirrors what each script would itself refuse to run without —
-    surfacing this BEFORE the run starts is the whole point of a
-    pre-deployment checking UI: catch a missing credential here, not 40
-    minutes into a 2000-product run on the instance."""
     creds_path = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
     return {
         "OZI_API_KEY": bool(os.environ.get("OZI_API_KEY")),
@@ -128,11 +75,132 @@ def env_check() -> dict:
     }
 
 
+def read_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        return json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def list_runs() -> list:
+    """Every run under ui_runs/ that has a pipeline_status.json, newest
+    first — this is what makes a run reattachable after a fresh page
+    load, since it's the only source of truth (not session_state)."""
+    runs = []
+    for d in RUNS_DIR.iterdir():
+        if not d.is_dir():
+            continue
+        status = read_json(d / "pipeline_status.json")
+        if not status:
+            continue
+        runs.append((d.name, status))
+    runs.sort(key=lambda x: x[0], reverse=True)
+    return runs
+
+
+def launch_run(input_path: Path, run_dir: Path, workers: int, overwrite: bool) -> None:
+    """Starts run_pipeline_all.py fully detached — start_new_session=True
+    puts it in its own process group/session so it does NOT receive a
+    SIGHUP if this Streamlit process (or its controlling terminal/SSH
+    session) goes away, the same guarantee `nohup` gives a shell command."""
+    cmd = [sys.executable, str(SCRIPTS_DIR / "run_pipeline_all.py"),
+          "--run-dir", str(run_dir), "--input", str(input_path),
+          "--workers", str(workers)]
+    if overwrite:
+        cmd.append("--overwrite")
+    log_path = run_dir / "pipeline.log"
+    with open(log_path, "a") as log_f:
+        subprocess.Popen(
+            cmd, cwd=str(REPO_ROOT), stdout=log_f, stderr=subprocess.STDOUT,
+            stdin=subprocess.DEVNULL, env=os.environ.copy(), start_new_session=True,
+        )
+
+
+def render_step_progress(run_dir: Path, status_filename: str, label: str) -> None:
+    data = read_json(run_dir / f"{status_filename}.status.json")
+    total = data.get("total", 0)
+    done = data.get("done", 0)
+    if total:
+        counts = {k: v for k, v in data.items()
+                 if k not in ("total", "done", "started_at", "updated_at", "finished_at")}
+        counts_str = ", ".join(f"{k}={v}" for k, v in counts.items() if v)
+        st.progress(min(done / total, 1.0),
+                   text=f"{label}: {done}/{total}" + (f" — {counts_str}" if counts_str else ""))
+    else:
+        st.caption(f"{label}: waiting for progress data...")
+
+
+def render_run(run_id: str) -> None:
+    run_dir = RUNS_DIR / run_id
+    status = read_json(run_dir / "pipeline_status.json")
+    stage = status.get("stage", "unknown")
+    label, status_filename = STAGE_LABELS.get(stage, (f"Unknown stage: {stage}", None))
+
+    if stage == "done":
+        st.success(f"✅ {label}")
+    elif stage == "failed":
+        st.error(f"❌ {label}: {status.get('error', 'unknown error')}")
+    else:
+        st.info(f"⏳ {label}...")
+
+    # Progress bars for every step up to and including the current one —
+    # each step's own *.status.json persists on disk after that step
+    # finishes, so completed steps still show their final count here.
+    for step in ("fetch", "classify", "generate"):
+        step_label, step_status_file = STAGE_LABELS[step]
+        if step_status_file and (run_dir / f"{step_status_file}.status.json").exists():
+            render_step_progress(run_dir, step_status_file, step_label)
+
+    with st.expander("Full log", expanded=(stage not in ("done", "failed"))):
+        log_path = run_dir / "pipeline.log"
+        if log_path.exists():
+            text = log_path.read_text(errors="replace")
+            st.code(text[-8000:] or "(empty)", language="text")
+        else:
+            st.caption("(no log yet)")
+
+    summary_path = run_dir / "products_6_images.xlsx"
+    final_path = run_dir / "final_output.xlsx"
+    if stage == "done" and summary_path.exists():
+        st.divider()
+        st.subheader("Result")
+        with open(summary_path, "rb") as f:
+            st.download_button(
+                "Download products_6_images.xlsx", f,
+                file_name="products_6_images.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key=f"dl_{run_id}",
+            )
+        try:
+            final_df = pd.read_excel(final_path)
+            st.write("Per-slot status breakdown:")
+            st.dataframe(final_df["Status"].value_counts().rename("count"))
+            needs_review = final_df[final_df["Status"].astype(str).str.contains("needs review", case=False)]
+            if len(needs_review):
+                st.warning(f"{len(needs_review)} slot(s) flagged \"needs review\" — "
+                          "these are on disk and linked, just never passed automatic verification.")
+                st.dataframe(needs_review[["Product_ID", "SKU", "Slot", "Image_Type", "Status"]])
+        except Exception as e:
+            st.caption(f"(Couldn't load preview: {e})")
+
+    # Auto-refresh while still active — reruns this whole script every
+    # ~3s so progress updates without the user touching anything, driven
+    # by re-reading disk state each time rather than any in-memory
+    # session data, which is what makes this survive a fresh page load.
+    if stage not in ("done", "failed"):
+        time.sleep(3)
+        st.rerun()
+
+
 st.title("OZi Toys Image Pipeline")
 st.caption(
     "Upload a product list, run the full pipeline, and watch every step — "
-    "progress, live logs, and errors — before this ever runs unattended on "
-    "an instance."
+    "progress, live logs, and errors. Runs happen in the background on the "
+    "server, independent of this browser tab — closing it, losing your "
+    "connection, or reloading the page will NOT stop or lose a run; just "
+    "come back and pick it from the list below."
 )
 
 with st.sidebar:
@@ -161,126 +229,58 @@ with st.sidebar:
     if model_override:
         os.environ["GEMINI_IMAGE_MODEL"] = model_override
 
-uploaded = st.file_uploader(
-    "Upload product list (.xlsx or .csv — needs a 'Product ID' or 'Admin Panel Link' column)",
-    type=["xlsx", "csv"],
-)
+tab_new, tab_monitor = st.tabs(["Start new run", "Watch a run"])
 
-run_clicked = st.button("Run pipeline", type="primary", disabled=uploaded is None)
+with tab_new:
+    uploaded = st.file_uploader(
+        "Upload product list (.xlsx or .csv — needs a 'Product ID' or 'Admin Panel Link' column)",
+        type=["xlsx", "csv"],
+    )
+    run_clicked = st.button("Run pipeline", type="primary", disabled=uploaded is None)
 
-if run_clicked and uploaded is not None:
-    if not all_ok:
-        st.error("Fix the missing environment variables in the sidebar before running.")
-        st.stop()
+    if run_clicked and uploaded is not None:
+        if not all_ok:
+            st.error("Fix the missing environment variables in the sidebar before running.")
+            st.stop()
 
-    # uuid suffix, not just the timestamp — on a shared instance, two
-    # people (or one impatient double-click) starting a run in the same
-    # second would otherwise get the SAME folder and silently clobber
-    # each other's input/output files mid-run.
-    run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
-    run_dir = RUNS_DIR / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
+        # uuid suffix, not just the timestamp — on a shared instance, two
+        # people (or one impatient double-click) starting a run in the
+        # same second would otherwise get the SAME folder and silently
+        # clobber each other's input/output files mid-run.
+        run_id = datetime.now().strftime("%Y%m%d_%H%M%S") + "_" + uuid.uuid4().hex[:6]
+        run_dir = RUNS_DIR / run_id
+        run_dir.mkdir(parents=True, exist_ok=True)
 
-    input_path = run_dir / f"input{Path(uploaded.name).suffix}"
-    input_path.write_bytes(uploaded.getvalue())
+        input_path = run_dir / f"input{Path(uploaded.name).suffix}"
+        input_path.write_bytes(uploaded.getvalue())
 
-    products_csv = run_dir / "products_detail.csv"
-    classification_csv = run_dir / "classification_result.csv"
-    images_dir = run_dir / "generated_images"
-    final_xlsx = run_dir / "final_output.xlsx"
-    summary_xlsx = run_dir / "products_6_images.xlsx"
+        launch_run(input_path, run_dir, workers, overwrite)
+        st.session_state["just_started_run_id"] = run_id
+        st.success(f"Started run `{run_id}` in the background — switch to "
+                  "the \"Watch a run\" tab to follow it (it'll be selected "
+                  "there automatically).")
 
-    python = sys.executable
-    pipeline_failed = False
-
-    with st.status("Step 1/4 — Fetching product details from the OZi admin API", expanded=True) as s1:
-        ok, _ = run_step(
-            [python, str(SCRIPTS_DIR / "fetch_product_details.py"),
-             "--input", str(input_path), "--out", str(products_csv),
-             "--workers", str(workers)],
-            str(products_csv) + ".status.json", s1,
-        )
-        if ok:
-            s1.update(label="Step 1/4 — Fetch complete ✅", state="complete")
-        else:
-            s1.update(label="Step 1/4 — Fetch FAILED ❌ (see log above)", state="error")
-            pipeline_failed = True
-
-    if not pipeline_failed:
-        with st.status("Step 2/4 — Classifying existing images against the rule master", expanded=True) as s2:
-            ok, _ = run_step(
-                [python, str(SCRIPTS_DIR / "classify_images.py"),
-                 "--input", str(products_csv), "--rules", str(RULES_PATH),
-                 "--out", str(classification_csv), "--workers", str(workers)],
-                str(classification_csv) + ".status.json", s2,
-            )
-            if ok:
-                s2.update(label="Step 2/4 — Classification complete ✅", state="complete")
-            else:
-                s2.update(label="Step 2/4 — Classification FAILED ❌ (see log above)", state="error")
-                pipeline_failed = True
-
-    if not pipeline_failed:
-        with st.status("Step 3/4 — Generating missing images (the slow step)", expanded=True) as s3:
-            cmd = [python, str(SCRIPTS_DIR / "generate_missing_images_gcp.py"),
-                  "--products", str(products_csv), "--classification", str(classification_csv),
-                  "--rules", str(RULES_PATH), "--image_out_dir", str(images_dir),
-                  "--out", str(final_xlsx), "--workers", str(workers)]
-            if overwrite:
-                cmd.append("--overwrite")
-            ok, _ = run_step(cmd, str(final_xlsx) + ".status.json", s3)
-            if ok:
-                s3.update(label="Step 3/4 — Generation complete ✅", state="complete")
-            else:
-                s3.update(label="Step 3/4 — Generation FAILED ❌ (see log above)", state="error")
-                pipeline_failed = True
-
-    if not pipeline_failed:
-        with st.status("Step 4/4 — Building the final summary sheet", expanded=True) as s4:
-            ok, _ = run_step(
-                [python, str(SCRIPTS_DIR / "build_wide_summary.py"),
-                 "--input", str(final_xlsx), "--out", str(summary_xlsx)],
-                None, s4,
-            )
-            if ok:
-                s4.update(label="Step 4/4 — Summary complete ✅", state="complete")
-            else:
-                s4.update(label="Step 4/4 — Summary build FAILED ❌ (see log above)", state="error")
-                pipeline_failed = True
-
-    if pipeline_failed:
-        st.error(
-            "Pipeline stopped at the first failed step — nothing downstream ran. "
-            "Fix the issue above and click Run again; already-completed rows/images "
-            "are checkpointed, so re-running only redoes what actually failed."
-        )
+with tab_monitor:
+    runs = list_runs()
+    if not runs:
+        st.caption("No runs yet — start one from the \"Start new run\" tab.")
     else:
-        st.success("Pipeline complete!")
-        st.session_state["last_run_dir"] = str(run_dir)
-        st.session_state["last_summary_path"] = str(summary_xlsx)
-        st.session_state["last_final_path"] = str(final_xlsx)
+        run_ids = [r[0] for r in runs]
+        default_idx = 0
+        just_started = st.session_state.get("just_started_run_id")
+        if just_started in run_ids:
+            default_idx = run_ids.index(just_started)
 
-if "last_summary_path" in st.session_state and os.path.exists(st.session_state["last_summary_path"]):
-    st.divider()
-    st.subheader("Result")
-    summary_path = st.session_state["last_summary_path"]
-    final_path = st.session_state["last_final_path"]
+        def _format_run(rid: str) -> str:
+            stage = dict(runs)[rid].get("stage", "unknown")
+            marker = {"done": "✅", "failed": "❌"}.get(stage, "⏳")
+            return f"{marker} {rid} ({stage})"
 
-    with open(summary_path, "rb") as f:
-        st.download_button(
-            "Download products_6_images.xlsx", f,
-            file_name="products_6_images.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        selected = st.selectbox(
+            "Run", run_ids, index=default_idx, format_func=_format_run,
+            help="Every run ever started, newest first — including ones from "
+                 "before this browser tab existed.",
         )
-
-    try:
-        final_df = pd.read_excel(final_path)
-        st.write("Per-slot status breakdown (this run):")
-        st.dataframe(final_df["Status"].value_counts().rename("count"))
-        needs_review = final_df[final_df["Status"].astype(str).str.contains("needs review", case=False)]
-        if len(needs_review):
-            st.warning(f"{len(needs_review)} slot(s) flagged \"needs review\" — "
-                      "these are on disk and linked, just never passed automatic verification.")
-            st.dataframe(needs_review[["Product_ID", "SKU", "Slot", "Image_Type", "Status"]])
-    except Exception as e:
-        st.caption(f"(Couldn't load preview: {e})")
+        if st.button("Refresh now"):
+            st.rerun()
+        render_run(selected)

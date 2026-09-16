@@ -33,3 +33,4 @@ generated_images*/
 # Per-run working directories created by ui/app.py (uploaded input +
 # every step's output for that run) — regenerated each run, not source.
 /ui_runs/
+/ui_runs_downloaded/
