@@ -64,14 +64,40 @@ RETRYABLE_STATUS = {401, 408, 429, 500, 502, 503, 504}
 # Constrains the response to valid JSON in this exact shape, so there is no
 # markdown fence or preamble to strip off before parsing. This is Gemini's
 # response_schema / responseMimeType structured-output mechanism.
+#
+# product_matches/issues_found force the model to itemize specific checks
+# (product/variant identity, completeness, parts, packaging, logos/text)
+# BEFORE it commits to a slot number — the same "enumerate before verdict"
+# pattern used in verify_dimension_image (a single holistic "does this fit
+# the slot?" judgment let through images that fit the slot's generic
+# description while still being the wrong product or missing parts).
 RESPONSE_SCHEMA = {
     "type": "OBJECT",
     "properties": {
+        "product_matches": {
+            "type": "BOOLEAN",
+            "description": ("True only if this photo clearly shows the SAME product "
+                           "described above — same shape, color, parts/accessories, and "
+                           "variant. False if it shows a different product, a different "
+                           "color or variant, or the product is not clearly identifiable "
+                           "in the photo."),
+        },
+        "issues_found": {
+            "type": "ARRAY",
+            "items": {"type": "STRING"},
+            "description": ("List any specific problems with this photo, checked one by "
+                           "one: wrong product or variant; damaged, incomplete, or "
+                           "deformed product; wrong color; missing or extra parts/"
+                           "accessories; wrong or clearly outdated packaging; blurry; "
+                           "watermarked; wrong background/framing for this slot type; "
+                           "wrong, unreadable, or mismatched logos or printed text. Empty "
+                           "list if none of these apply."),
+        },
         "slot": {"type": "INTEGER"},
         "confidence": {"type": "STRING", "enum": ["high", "medium", "low"]},
         "reason": {"type": "STRING"},
     },
-    "required": ["slot", "confidence", "reason"],
+    "required": ["product_matches", "issues_found", "slot", "confidence", "reason"],
 }
 
 CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
@@ -125,11 +151,16 @@ def build_classification_prompt(slots: list, product_name: str = "", description
 Required slots:
 {slot_list}
 
-Look at the attached image and decide which ONE slot number it best fulfils.
-If it clearly does not fulfil any of these slots adequately (wrong content, too
-blurry, watermarked, wrong background for that slot type, shows a different
-product than the one described above, or the product is not clearly visible),
-respond with slot number 0.
+First check product_matches and issues_found (see their field descriptions) —
+go through each possible problem one by one rather than judging the photo
+holistically at a glance. Only after that, decide which ONE slot number this
+image best fulfils.
+
+If product_matches is false, or issues_found is non-empty, or the image
+otherwise clearly does not fulfil any of these slots adequately (too blurry,
+wrong background for that slot type, product not clearly visible), respond
+with slot number 0 regardless of how well the photo's content or composition
+happens to otherwise match a slot's generic description.
 
 Give a one short phrase reason."""
 
@@ -229,6 +260,23 @@ def _parse_classify_response(result: dict) -> dict:
         parsed = json.loads(text)
     except json.JSONDecodeError as e:
         return {"slot": 0, "confidence": "low", "reason": f"unparsable_response: {e}"}
+
+    # Deterministic override — don't trust the model's own combined "slot"
+    # pick over its own itemized findings. A real image scored well against
+    # a slot's generic wording (right composition, right background) while
+    # product_matches was actually false or issues_found had real entries;
+    # forcing slot=0 here whenever either fires means a stray "slot: 3"
+    # can never smuggle a flagged image past classification into
+    # Covered_Slots, same non-bypassable pattern as the axis-swap checks in
+    # verify_dimension_image.
+    issues = parsed.get("issues_found") or []
+    if not parsed.get("product_matches", True) or issues:
+        parsed["slot"] = 0
+        base_reason = parsed.get("reason", "")
+        if not parsed.get("product_matches", True):
+            parsed["reason"] = f"product_mismatch: {base_reason}"
+        elif issues:
+            parsed["reason"] = f"issues_found {issues}: {base_reason}"
 
     return parsed
 

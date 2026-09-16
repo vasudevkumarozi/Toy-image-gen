@@ -197,6 +197,18 @@ def _label_dimension_value(key: str, value: str) -> str:
     was which axis. Returns the original value unchanged if the key
     doesn't carry an explicit axis-order hint (e.g. plain "Dimensions /
     Size"), so callers with no letter hint keep today's behavior.
+
+    "Length" is always re-paired to whichever of the two HORIZONTAL
+    numbers (Length vs Breadth/Width) is bigger — Height/Depth is never
+    touched. A real product's own Specifications literally read "Dimensions
+    (LxBxH): 22.8 x 28.5 x 3.8 cm" (L=22.8 < B=28.5) — trusting that literal
+    pairing rendered a correct, self-consistent image (the bigger 28.5 edge
+    genuinely drawn longer), but a reviewer expects the edge LABELED
+    "Length" to always be the longer one, regardless of which word the
+    admin happened to write next to which number. This is a deliberate
+    product decision (confirmed explicitly), not a bug fix — some real
+    admin data pairs these two words with the smaller/bigger number either
+    way.
     """
     axis_match = re.search(r"\b([lwbhd])x([lwbhd])x([lwbhd])\b", key)
     if not axis_match:
@@ -206,8 +218,15 @@ def _label_dimension_value(key: str, value: str) -> str:
         return value
     unit_match = re.search(r"([a-zA-Z]+)\s*$", value.strip())
     unit = unit_match.group(1) if unit_match else ""
+    letters = list(axis_match.groups())
+    length_idx = [i for i, l in enumerate(letters) if l == "l"]
+    other_horiz_idx = [i for i, l in enumerate(letters) if l in ("w", "b")]
+    if len(length_idx) == 1 and len(other_horiz_idx) == 1:
+        li, oi = length_idx[0], other_horiz_idx[0]
+        if float(numbers[li]) < float(numbers[oi]):
+            numbers[li], numbers[oi] = numbers[oi], numbers[li]
     labeled = [f"{_AXIS_LABELS[letter]} {num} {unit}".strip()
-              for letter, num in zip(axis_match.groups(), numbers)]
+              for letter, num in zip(letters, numbers)]
     return ", ".join(labeled)
 
 
@@ -247,6 +266,111 @@ def extract_dimensions_from_description(description: str, specifications: str = 
         key, value = hinted[0] if hinted else candidates[0]
         return _label_dimension_value(key, value)
     return spec_fields.get("size") or desc_fields.get("size", "")
+
+
+DIMENSION_STATUS_VERIFIED = "VERIFIED_DIMENSIONS"
+DIMENSION_STATUS_AMBIGUOUS = "AMBIGUOUS_DIMENSIONS"
+DIMENSION_STATUS_MISSING = "MISSING_DIMENSIONS"
+
+_AXIS_VALUE_RE = re.compile(r"(Length|Width|Breadth|Height|Depth)\s+([\d.]+)\s*([a-zA-Z]*)")
+
+
+def _parse_labeled_axis_values(labeled_text: str) -> dict:
+    """"Length 26.2 cm, Breadth 14.1 cm, Height 4.8 cm" -> {"Length": 26.2,
+    "Breadth": 14.1, "Height": 4.8, "_unit": "cm"}. {} if nothing parses —
+    the caller treats that as "couldn't actually verify an axis" rather
+    than trusting the raw text blindly."""
+    out = {}
+    unit = ""
+    for axis, num, u in _AXIS_VALUE_RE.findall(labeled_text):
+        out[axis] = float(num)
+        unit = unit or u
+    if out:
+        out["_unit"] = unit
+    return out
+
+
+def classify_dimensions(description: str, specifications: str = "") -> dict:
+    """The single source of truth for whether a product's admin-panel size
+    data can be trusted to say WHICH number is Length vs Breadth vs Height
+    — not just that three numbers exist somewhere in the text.
+
+    extract_dimensions_from_description() already picks the right field and,
+    when the key carries an explicit axis-order hint (e.g. "Dimensions
+    (LxBxH)"), labels each number by name via _label_dimension_value(). But
+    it returns a plain string either way — callers previously treated "we
+    found some numbers" as good enough to attempt arrow generation, even
+    for a bare "Dimensions / Size: 20 x 15 x 2 cm" with NO order guarantee
+    at all. That silently asked the image model to guess which of the two
+    horizontal numbers was Length vs Breadth — exactly the axis-swap defect
+    this function exists to stop before generation ever starts.
+
+    Returns a dict:
+        length, breadth, height  — float or None
+        unit                     — str
+        source                   — "Specifications" | "Description" | ""
+        status                   — one of the three DIMENSION_STATUS_* constants
+        raw_text                 — the original text this was derived from
+        confidence               — "high" | "low" | "none"
+
+    Rules:
+      VERIFIED_DIMENSIONS — the source key carries an axis-order hint
+        (LxBxH-style) AND the labeled numbers actually parsed. Safe to
+        build a Measurement Layout Plan and check drawn arrows against it.
+      AMBIGUOUS_DIMENSIONS — real numbers exist (a dimension key, or a bare
+        "Size" field) but nothing proves the order is Length-then-Breadth-
+        then-Height. Do NOT let the image model guess this order — route
+        to manual review instead (see generate_missing_images_gcp.py).
+      MISSING_DIMENSIONS — no usable size data at all.
+    """
+    spec_fields = parse_description_fields(specifications)
+    desc_fields = parse_description_fields(description)
+    axis_hint_re = re.compile(r"\b([lwbhd])x([lwbhd])x([lwbhd])\b")
+
+    for source_name, fields in (("Specifications", spec_fields), ("Description", desc_fields)):
+        candidates = [(k, v) for k, v in fields.items() if "dimension" in k and v]
+        if not candidates:
+            continue
+        hinted = [(k, v) for k, v in candidates if axis_hint_re.search(k)]
+        if hinted:
+            key, value = hinted[0]
+            labeled = _label_dimension_value(key, value)
+            axis_values = _parse_labeled_axis_values(labeled)
+            if axis_values:
+                return {
+                    "length": axis_values.get("Length"),
+                    "breadth": axis_values.get("Breadth", axis_values.get("Width")),
+                    "height": axis_values.get("Height"),
+                    "unit": axis_values.get("_unit", ""),
+                    "source": source_name,
+                    "status": DIMENSION_STATUS_VERIFIED,
+                    "raw_text": labeled,
+                    "confidence": "high",
+                }
+        # A dimension key exists but with no axis-order hint (or the hinted
+        # key's numbers didn't parse cleanly) — real numbers, unproven
+        # order. AMBIGUOUS, not VERIFIED, even though
+        # extract_dimensions_from_description() would return them as-is.
+        key, value = candidates[0]
+        return {
+            "length": None, "breadth": None, "height": None, "unit": "",
+            "source": source_name, "status": DIMENSION_STATUS_AMBIGUOUS,
+            "raw_text": value, "confidence": "low",
+        }
+
+    bare_size = spec_fields.get("size") or desc_fields.get("size", "")
+    if bare_size:
+        return {
+            "length": None, "breadth": None, "height": None, "unit": "",
+            "source": "Specifications" if spec_fields.get("size") else "Description",
+            "status": DIMENSION_STATUS_AMBIGUOUS, "raw_text": bare_size,
+            "confidence": "low",
+        }
+    return {
+        "length": None, "breadth": None, "height": None, "unit": "",
+        "source": "", "status": DIMENSION_STATUS_MISSING, "raw_text": "",
+        "confidence": "none",
+    }
 
 
 def is_battery_operated(description: str, specifications: str = ""):

@@ -50,20 +50,27 @@ def load_long_format(path: str) -> tuple:
             # cases — quality_check_failed just means we couldn't verify
             # its resolution, not that it was replaced with anything.
             link, label = image_source, image_source
-        elif status in ("Generated", "Generated (needs review)", "Existing (enhanced)"):
+        elif status in ("Generated", "Existing (enhanced)"):
             if gcp_link:
                 link, label = gcp_link, gcp_link
             else:
                 link, label = None, f"{image_source} (LOCAL FILE — not uploaded to GCS)"
-            if status == "Generated (needs review)":
-                # Exhausted the 3-attempt verify-and-retry loop without a
-                # clean pass (see generate_image_with_verification) — the
-                # file is real and uploaded, just never confirmed correct,
-                # so flag it for a human look rather than hiding that.
-                label = f"{label} (NEEDS REVIEW)"
-                note_flag = f"Slot {slot} ({image_type}) needs manual review"
-                products[pid]["note"] = (products[pid]["note"] + "; " + note_flag
-                                         if products[pid]["note"] else note_flag)
+        elif status in ("Generated (needs review)", "MANUAL_REVIEW_REQUIRED"):
+            # HARD GATE — an image that exhausted every verify-and-retry
+            # attempt without a clean pass ("Generated (needs review)"), or
+            # was routed to manual review before generation was even
+            # attempted at all (ambiguous/missing dimension data — see
+            # classify_dimensions in pipeline_lib.py), must never appear as
+            # a normal, clickable image link in the actual deliverable.
+            # Previously this branch still wrote a live gcp_link here,
+            # distinguished only by a "(NEEDS REVIEW)" text suffix — nothing
+            # stopped someone clicking it and treating it as a passing
+            # image. No link, ever, for either status — same as a genuine
+            # generation failure below.
+            link, label = None, f"[{status}]"
+            note_flag = f"Slot {slot} ({image_type}) needs manual review"
+            products[pid]["note"] = (products[pid]["note"] + "; " + note_flag
+                                     if products[pid]["note"] else note_flag)
         else:
             link, label = None, f"[{status}]"
 
