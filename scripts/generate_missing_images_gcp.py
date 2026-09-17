@@ -72,10 +72,13 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
 
+import cv2
+import numpy as np
 import openpyxl
 import pandas as pd
 import requests
@@ -372,6 +375,27 @@ NO_OTHER_PRODUCTS_RULE = (
     "not cross is anything that reads as its own specific toy/product."
 )
 
+# A real Iron Man lifestyle shot came back with the SAME figure shown twice
+# in one scene — once loose in the child's hand, once still inside its box
+# held by the parent — and that box's plastic window was rendered torn/
+# ripped open. NO_OTHER_PRODUCTS_RULE didn't catch this because it bans a
+# DIFFERENT product, not a second instance of THIS SAME one. Two separate
+# defects worth calling out explicitly: (1) a duplicated product reads as
+# "does this come as a set of two", and (2) a torn/ripped box always reads
+# as damaged merchandise, regardless of whether it's an intentional
+# "unboxing moment" — never acceptable in a marketing image.
+NO_DUPLICATE_INSTANCE_RULE = (
+    "Show exactly ONE physical instance of this product in the scene — do "
+    "not also include a second copy of the SAME product elsewhere in "
+    "frame, whether that second copy is fully boxed, partially boxed, or "
+    "in the background. This applies even if it might seem like a natural "
+    "'unboxing' moment — a customer must not see two of the same item and "
+    "wonder if two are included. Separately: never depict this product's "
+    "retail box torn, ripped, cut open, or damaged in any way — a torn or "
+    "damaged box always reads as defective/damaged merchandise, which is "
+    "not acceptable in a marketing image under any circumstance."
+)
+
 # A real "Learning" scene (kids at a table) came back with the actual photo
 # letterboxed into a landscape strip with big blank white bars filling the
 # rest of the canvas top and bottom. Likely cause: FRAMING_RULE's "leave
@@ -413,6 +437,29 @@ FLAT_PRINT_RULE = (
     "Always keep the entire cover (or the entire open spread) inside the "
     "frame with visible margin on all sides — never crop into or past the "
     "edge of the artwork or any text."
+)
+
+# A generated "Box Back Content" shot invented an entire back-of-box layout
+# (bullet-point copy, mini character lineup, barcode) with no way to verify
+# any of it against the real product, since the reference photo only shows
+# the box FRONT — unlike a redrawn front logo (caught by
+# PACKAGING_FIDELITY_RULE, which assumes the real design IS visible in the
+# reference), there is no ground truth at all for a face that was never
+# photographed. Inventing packaging text/layout that can't be checked is
+# worse than just not showing that face.
+BOX_BACK_CONTENT_RULE = (
+    "This slot asks for the BOX'S BACK PANEL CONTENT specifically (bullet "
+    "points, feature callouts, mini photos, or similar printed back-cover "
+    "layout) — but the reference photo only shows this product's box from "
+    "the front, so there is no real information about what the back panel "
+    "actually looks like. Do NOT invent back-panel text, bullet copy, "
+    "character artwork, or layout that isn't visible in the reference photo "
+    "— fabricated packaging content cannot be verified and may not match "
+    "the real product's actual box. Instead, show the box from a different, "
+    "SAFELY INFERABLE angle that stays consistent with what the reference "
+    "photo actually shows (e.g. a 3/4 angled view of the same front the "
+    "reference shows, or a visible side panel) rather than inventing the "
+    "one face you have no reference for."
 )
 
 NO_INVENTED_ACCESSORIES_RULE = (
@@ -543,6 +590,22 @@ FEATURE_EXTRACT_SCHEMA = {
     "required": ["features"],
 }
 
+# Generic filler words excluded when comparing two extracted feature phrases
+# for overlap — everything else (including plain nouns like "handle" or
+# "knob") is treated as significant, since a shared concrete noun is exactly
+# what indicates two phrasings name the same physical part.
+_FEATURE_DEDUPE_STOPWORDS = {
+    "a", "an", "the", "of", "for", "with", "and", "or", "to", "in", "on",
+    "is", "its", "this", "that", "these", "those", "at", "as", "by",
+    "feature", "design", "part", "product", "easy", "premium", "quality",
+    "various", "included", "interactive",
+}
+
+
+def _feature_content_words(phrase: str) -> set:
+    return {w for w in re.findall(r"[a-z0-9]+", phrase.lower())
+           if w not in _FEATURE_DEDUPE_STOPWORDS}
+
 
 def extract_distinct_features(product_name: str, category: str, description: str,
                               specifications: str, count: int, project_id: str,
@@ -578,6 +641,16 @@ def extract_distinct_features(product_name: str, category: str, description: str
         context += f"\nSpecifications: {specifications[:800]}"
     prompt = (
         f"{context}\n\n"
+        f"Read the ENTIRE description and specification text carefully before "
+        f"answering — check every bullet point, material, mechanism, included "
+        f"accessory/component, printed character or branding, safety feature, "
+        f"and educational/skill callout for a genuinely separate physical "
+        f"aspect, not just the first or most obvious one. A product with only "
+        f"one standout feature mentioned repeatedly in different words (e.g. "
+        f"an \"easy-grip handle\" described once as a comfort feature and "
+        f"again as a motor-skill feature) has ONE feature, not two — do not "
+        f"reword the same part to pad the list to {count}; return fewer "
+        f"instead (see below).\n\n"
         f"List up to {count} DISTINCT physical features, parts, or selling "
         f"points of THIS specific product that would each make a good "
         f"individual close-up product photo — e.g. a specific control, "
@@ -614,15 +687,24 @@ def extract_distinct_features(product_name: str, category: str, description: str
             return []
         parsed = json.loads(text)
         features = [f.strip() for f in (parsed.get("features") or []) if f and f.strip()]
-        # Defensive de-dupe (case-insensitive) in case the model still
-        # rephrases the same part twice despite the instruction above.
-        seen = set()
+        # Defensive de-dupe in case the model still rephrases the same part
+        # twice despite the instruction above — exact-string matching alone
+        # isn't enough. A real product (a Peppa Pig cupcake toy) had its
+        # extraction come back as "Easy-Grip Interactive Handle",
+        # "Easy-Grip Handle", and "Easy-Grip Handle Joint" — three different
+        # strings, so the old case-insensitive check let all three through,
+        # and all three feature_N slots ended up highlighting the exact same
+        # physical handle. Any shared significant word (e.g. "handle", or
+        # "tuning" in the "tuning knobs"/"tuning pegs" example above) is
+        # treated as the same physical part.
+        seen_word_sets = []
         deduped = []
         for f in features:
-            key = f.lower()
-            if key not in seen:
-                seen.add(key)
-                deduped.append(f)
+            words = _feature_content_words(f)
+            if any(words & prior for prior in seen_word_sets):
+                continue
+            seen_word_sets.append(words)
+            deduped.append(f)
         return deduped
     except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError):
         return []
@@ -726,6 +808,29 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
                 "store shelf before opening — NOT the assembled or open "
                 "product with pieces placed in slots, removed, or scattered "
                 "around it. Draw the measurement arrows on that closed box."
+            )
+        elif is_typically_boxed_single_item(category, product_name, description, specifications):
+            # A single Iron Man action figure's Size/Dimensions image
+            # rendered inconsistently across runs — sometimes the closed
+            # box, sometimes the bare figure lying flat with the SAME
+            # numbers (20x10x5 cm) drawn on its own body, even though its
+            # own listed height (9.5in/~24cm) doesn't match that bounding
+            # box at all. This category is always sold sealed in box/
+            # blister packaging, and the admin's printed dimensions are
+            # therefore the PACKAGING's size, not the bare figure's — so
+            # this must be forced the same way as the multipiece case
+            # above, not left for the model to guess from the reference
+            # photo alone.
+            dimension_note += (
+                "\n\nThis product is normally sold sealed in retail box or "
+                "blister packaging, and the dimensions given above describe "
+                "that PACKAGING, not the bare unpackaged figure/item on its "
+                "own. For this Size/Dimensions image, depict the product in "
+                "its CLOSED, SEALED retail packaging — as it would look on a "
+                "store shelf before opening — NOT the bare figure/item "
+                "removed from its box and laid on a surface. Draw the "
+                "measurement arrows on that closed packaging, never on the "
+                "bare item itself."
             )
         # Specifications' "Dimensions (LxBxH)" wins over anything embedded
         # in the free-text description on conflict — see
@@ -1027,7 +1132,7 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
     # product shots on white are unaffected since "empty space around the
     # product" IS the correct white background there.
     if any(k in image_type_lower for k in ("lifestyle", "learning", "skills", "action")):
-        extra_rules += " " + FULL_BLEED_RULE
+        extra_rules += " " + FULL_BLEED_RULE + " " + NO_DUPLICATE_INSTANCE_RULE
     if "lifestyle" in image_type_lower:
         extra_rules += " " + FOCUS_RULE + " " + INDIA_REPRESENTATION_RULE + " " + NO_OTHER_PRODUCTS_RULE
         # A small RC car came back looking oversized next to the child
@@ -1118,6 +1223,8 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
         extra_rules += " " + PACKAGING_LOGIC_RULE
     if any(k in image_type_lower for k in ("box", "pack", "package")):
         extra_rules += " " + PACKAGING_FIDELITY_RULE
+    if "back" in image_type_lower and ("content" in image_type_lower or "box" in image_type_lower):
+        extra_rules += " " + BOX_BACK_CONTENT_RULE
 
     accessory_note = ""
     if is_battery_operated(description, specifications) is False:
@@ -1365,16 +1472,129 @@ def pick_reference_image(covered: dict, image_urls: list) -> str:
     That last fallback (image_urls[0], used only when `covered` is empty —
     i.e. classify_images.py rejected EVERY existing image for this product)
     has no validation of its own — it could be the exact image classify
-    just rejected as wrong/unusable. build_slot_tasks tags this case via
-    the "reference_unverified" flag; process_slot_task gates it through
-    assess_reference_image()/ReferenceAssessmentCache before ever using it
-    as a generation reference, rather than trusting it silently.
+    just rejected as wrong/unusable. process_slot_task now runs
+    assess_reference_image()/ReferenceAssessmentCache unconditionally on
+    whatever reference ends up chosen here (not just this fallback case) —
+    trusting classify_images.py's own per-slot judgment alone let a
+    fundamentally wrong product photo slip through undetected on a run
+    where it happened to accept the photo for at least one slot.
+
+    Kept as the single "primary"/identity-check reference — see
+    build_reference_set for the newer per-slot reference selection used
+    for actual generation.
     """
     if 1 in covered:
         return covered[1]
     if covered:
         return covered[min(covered)]
     return image_urls[0] if image_urls else ""
+
+
+# Roles a product's own validated existing images (already vetted for
+# product identity by classify_images.py — an image only ends up in
+# `covered` if it accepted THAT specific photo as showing this product for
+# some slot) get grouped into, keyed by scanning each covered slot's own
+# image_type text for these keywords.
+_PACKAGING_ROLE_KEYWORDS = ("box", "pack", "package")
+_SECONDARY_ROLE_KEYWORDS = ("angle", "second", "opposite", "rear")
+
+
+def build_reference_set(covered: dict, slots: dict, image_urls: list,
+                        reference_quality: dict = None) -> dict:
+    """Groups this product's own validated existing images by ROLE instead
+    of collapsing everything down to the one single reference photo reused
+    for every generation call regardless of what that slot actually needs
+    to depict. A real defect (product 35806's "Box Back Content" slot)
+    invented an entire back-panel design because the only reference it
+    ever saw was whatever photo covered slot 1 (the front) — if the admin
+    panel has a real photo covering a packaging-type slot, a "Box Back
+    Content"/similar slot should see THAT photo instead, not the front view.
+
+    reference_quality (from classify_images.py's Reference_Quality column —
+    see build_classification_prompt/RESPONSE_SCHEMA) answers a DIFFERENT
+    question than "is this slot covered": a photo can correctly satisfy its
+    OWN slot while being poor raw material to generate a DIFFERENT slot
+    from (too zoomed, product partly out of frame, packaging obscuring most
+    of it). Candidates with usable_as_reference explicitly False are
+    excluded from every role here — they still remain that slot's own
+    deliverable (see covered_url/ensure_existing_image_quality, unaffected
+    by this function) — and when more than one candidate qualifies for the
+    same role, the one with the higher image_quality wins. Missing/absent
+    quality data for a slot defaults to "usable" (True) so this is a pure
+    additive improvement on classification_result.csv files predating this
+    column, never a new way to regress to worse behavior.
+
+    Returns {"primary": url|None, "secondary": url|None,
+             "packaging": url|None, "feature": url|None,
+             "all_valid": [urls...]}. A missing role is None — callers
+    (see pick_slot_reference) must fall back to "primary", never treat a
+    missing role as an error.
+    """
+    reference_quality = reference_quality or {}
+
+    def _quality(slot_num):
+        return reference_quality.get(str(slot_num), {})
+
+    def _is_usable(slot_num):
+        return _quality(slot_num).get("usable_as_reference", True)
+
+    def _score(slot_num):
+        return _quality(slot_num).get("image_quality", 0.5)
+
+    usable_slots = {sn: url for sn, url in covered.items() if _is_usable(sn)}
+
+    result = {"primary": None, "secondary": None, "packaging": None,
+             "feature": None, "all_valid": list(covered.values())}
+    role_candidates = {"packaging": [], "feature": [], "secondary": []}
+    for slot_num, url in usable_slots.items():
+        slot_info = slots.get(slot_num)
+        image_type_lower = slot_info["image_type"].lower() if slot_info else ""
+        if any(k in image_type_lower for k in _PACKAGING_ROLE_KEYWORDS):
+            role_candidates["packaging"].append(slot_num)
+        elif "feature" in image_type_lower:
+            role_candidates["feature"].append(slot_num)
+        elif any(k in image_type_lower for k in _SECONDARY_ROLE_KEYWORDS):
+            role_candidates["secondary"].append(slot_num)
+    for role, candidates in role_candidates.items():
+        if candidates:
+            best = max(candidates, key=_score)
+            result[role] = usable_slots[best]
+
+    if 1 in usable_slots:
+        result["primary"] = usable_slots[1]
+    elif usable_slots:
+        result["primary"] = usable_slots[max(usable_slots, key=_score)]
+    elif 1 in covered:
+        # Nothing passed the usability bar, including slot 1 — fall back to
+        # it anyway rather than leave primary empty when slot 1 IS covered;
+        # still strictly better than pre-quality-data behavior, never worse.
+        result["primary"] = covered[1]
+    elif covered:
+        result["primary"] = covered[min(covered)]
+    elif image_urls:
+        result["primary"] = image_urls[0]
+    return result
+
+
+def pick_slot_reference(reference_set: dict, slot_info: dict) -> str:
+    """Chooses the best-suited reference image for ONE slot from the
+    product's reference set — a "Box Back Content" slot gets the real
+    packaging photo when the admin panel has one covering some packaging-
+    type slot, a "Feature" slot gets a real feature-type photo, etc.,
+    instead of every slot always reusing whatever covered slot 1. Falls
+    back to "primary" (and, if that's also empty, "" — callers already
+    treat an empty reference as failed_no_reference_image) whenever this
+    product has no covered image of the specifically-needed role."""
+    image_type_lower = slot_info["image_type"].lower()
+    if any(k in image_type_lower for k in _PACKAGING_ROLE_KEYWORDS):
+        candidate = reference_set.get("packaging")
+    elif "feature" in image_type_lower:
+        candidate = reference_set.get("feature")
+    elif any(k in image_type_lower for k in _SECONDARY_ROLE_KEYWORDS):
+        candidate = reference_set.get("secondary")
+    else:
+        candidate = None
+    return candidate or reference_set.get("primary") or ""
 
 
 REFERENCE_ASSESSMENT_SCHEMA = {
@@ -1631,6 +1851,27 @@ def is_boxed_multipiece_product(category: str, product_name: str, description: s
     return contents.count(",") >= 2
 
 
+# A real product (a 9.5-inch Hasbro Iron Man action figure, admin
+# Dimensions 20x10x5 cm) had its Size/Dimensions image swing between runs:
+# sometimes the closed retail box, sometimes the bare figure laid flat on
+# the floor with the SAME numbers drawn onto its own body — a 9.5in
+# (~24cm) standing figure obviously isn't a 20cm bounding box lying down,
+# so those numbers are almost certainly the BOX's dimensions, not the
+# figure's. is_boxed_multipiece_product doesn't catch this: a single
+# action figure isn't "multiple loose pieces". Any category where the
+# item is always sold sealed in box/blister packaging — and the printed
+# admin dimensions are therefore packaging dimensions, not the bare item's
+# — needs the same forced "closed box" treatment for exactly the same
+# reason, independent of whether it's one piece or many.
+ALWAYS_BOXED_CATEGORIES = ("action figures & collectibles",)
+
+
+def is_typically_boxed_single_item(category: str, product_name: str, description: str,
+                                   specifications: str) -> bool:
+    haystack = _shape_haystack(category, product_name, description, specifications)
+    return any(c in haystack for c in ALWAYS_BOXED_CATEGORIES)
+
+
 def _keyword_in_haystack(keyword: str, haystack: str) -> bool:
     """Word-bounded match for a single short word (avoids "ball" matching
     inside "pinball"/"basketball", "jar" inside a longer compound, etc.) —
@@ -1745,6 +1986,114 @@ def is_soft_foldable_product(category: str, product_name: str, description: str,
     return any(_keyword_in_haystack(k, haystack) for k in SOFT_FOLDABLE_KEYWORDS)
 
 
+DIECAST_SCALE_BRANDS = ("hot wheels", "majorette", "matchbox")
+# An explicit "1:NN" anywhere in the name/spec always wins — some die-cast
+# lines (Actonn RMZ, some Majorette sets) are 1:24, 1:32, 1:35, 1:36, 1:37, or
+# 1:40, not the 1:64 "basic car" mainline. Falling back to 1:64 ONLY for the
+# three brands whose mainline product is reliably that scale (a well-known,
+# consistent collector fact for Hot Wheels/Matchbox/Majorette basic cars) —
+# never guessed for any other brand, since a wrong assumption here is worse
+# than the existing MANUAL_REVIEW_REQUIRED fallback.
+_SCALE_RATIO_RE = re.compile(r"\b1\s*[:/]\s*(\d{2,3})\b")
+# A generic real passenger car's approximate length/width/height in cm —
+# NOT a per-model lookup (no real per-car database available). This is the
+# same assumption underlying the actual observed real-world fact that
+# mainline 1:64 Hot Wheels/Matchbox/Majorette cars are consistently ~7 cm
+# long regardless of which real car they model, since manufacturers target a
+# fixed packaged toy size, not a strict scale-accurate one. Used only when
+# admin's own dimension data is MISSING/AMBIGUOUS for a confirmed die-cast
+# scale-model vehicle.
+_REFERENCE_CAR_CM = (440.0, 175.0, 145.0)
+
+
+def detect_diecast_scale_ratio(category: str, product_name: str, description: str,
+                               specifications: str) -> "int | None":
+    """Returns the scale-model denominator (e.g. 64 for "1:64") if this is a
+    die-cast scale-model vehicle whose real-world size can be defensibly
+    estimated from its scale ratio, else None (routes to the existing
+    MANUAL_REVIEW_REQUIRED path, unchanged)."""
+    haystack = _shape_haystack(category, product_name, description, specifications)
+    match = _SCALE_RATIO_RE.search(haystack)
+    if match:
+        return int(match.group(1))
+    if any(_keyword_in_haystack(b, haystack) for b in DIECAST_SCALE_BRANDS):
+        return 64
+    return None
+
+
+def estimate_diecast_dimensions_cm(scale_ratio: int) -> dict:
+    length, breadth, height = (round(v / scale_ratio, 1) for v in _REFERENCE_CAR_CM)
+    return {"length": length, "breadth": breadth, "height": height}
+
+
+REFERENCE_DIMENSION_CHECK_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "has_labeled_dimensions": {
+            "type": "BOOLEAN",
+            "description": ("True ONLY if this photo already has printed measurement "
+                           "numbers with units (cm/mm/inch) attached to arrows or lines "
+                           "drawn on the product, forming a real size/dimension diagram — "
+                           "not just a plain product photo, and not a generic size chart "
+                           "for a whole size-range (e.g. S/M/L clothing chart) that isn't "
+                           "specific to this exact item's own measurements."),
+        },
+        "reason": {"type": "STRING"},
+    },
+    "required": ["has_labeled_dimensions", "reason"],
+}
+
+
+def reference_already_shows_dimensions(reference_url: str, project_id: str, region: str,
+                                       tokens: VertexTokenProvider) -> dict:
+    """Checks whether the admin's OWN reference photo for the Size/Dimensions
+    slot already IS a proper labeled dimension diagram (arrows + printed
+    numbers) — if so, that real photo should be used as-is instead of
+    generating one, since it's strictly more trustworthy than anything we'd
+    render. Almost every admin reference photo for this slot is just a plain
+    product photo (no such diagram), so this is expected to return False for
+    the large majority of products — it exists for the real minority where
+    the manufacturer's own catalog image already has one.
+
+    Fails open (False — fall through to the existing generation path,
+    unchanged) on any error, same policy as assess_reference_image."""
+    try:
+        content, media_type = get_image_bytes(reference_url)
+    except (requests.RequestException, OSError) as e:
+        return {"has_labeled_dimensions": False, "reason": f"could not download: {e}"}
+    prompt = (
+        "Look at this product photo. Does it already show printed measurement "
+        "numbers (with units like cm/mm/inch) attached to arrows or lines "
+        "drawn directly on the product, forming a real, specific size/"
+        "dimension diagram for this exact item?"
+    )
+    endpoint = (
+        f"https://{region}-aiplatform.googleapis.com/v1/projects/{project_id}"
+        f"/locations/{region}/publishers/google/models/{DIMENSION_VERIFY_MODEL}:generateContent"
+    )
+    body = {
+        "contents": [{"role": "user", "parts": [
+            {"inlineData": {"mimeType": media_type, "data": base64.b64encode(content).decode()}},
+            {"text": prompt},
+        ]}],
+        "generationConfig": {"responseMimeType": "application/json",
+                             "responseSchema": REFERENCE_DIMENSION_CHECK_SCHEMA},
+    }
+    try:
+        headers = {"Authorization": f"Bearer {tokens.token()}", "Content-Type": "application/json"}
+        resp = requests.post(endpoint, headers=headers, json=body, timeout=30)
+        if resp.status_code != 200:
+            return {"has_labeled_dimensions": False, "reason": f"HTTP {resp.status_code}"}
+        candidates = resp.json().get("candidates") or []
+        parts = candidates[0].get("content", {}).get("parts") or [] if candidates else []
+        text = next((p["text"] for p in parts if "text" in p), None)
+        if text is None:
+            return {"has_labeled_dimensions": False, "reason": "no_text_in_response"}
+        return json.loads(text)
+    except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError) as e:
+        return {"has_labeled_dimensions": False, "reason": f"verification_error: {e}"}
+
+
 def build_measurement_layout_plan(dim_data: dict, category: str, product_name: str,
                                   description: str, specifications: str) -> dict:
     """The actual GEOMETRY decision, made deterministically and up front —
@@ -1766,7 +2115,8 @@ def build_measurement_layout_plan(dim_data: dict, category: str, product_name: s
     "L=20, B=15", and "L=20, B=20" must produce no swap constraint at all).
     """
     is_vehicle = is_vehicle_product(category, product_name, description, specifications)
-    is_boxed_multi = is_boxed_multipiece_product(category, product_name, description, specifications)
+    is_boxed_multi = (is_boxed_multipiece_product(category, product_name, description, specifications)
+                      or is_typically_boxed_single_item(category, product_name, description, specifications))
     is_flat = is_flat_product(category, product_name, description, specifications)
     is_cyl = is_cylindrical_product(category, product_name, description, specifications)
 
@@ -2149,7 +2499,16 @@ DIMENSION_VERIFY_SCHEMA = {
         "arrow_count": {"type": "INTEGER"},
         "reason": {"type": "STRING"},
     },
-    "required": ["arrows_found", "valid", "arrow_count", "reason"],
+    # longest_horizontal_arrow_label/overall_longest_arrow_label are now
+    # required (not just optional-with-a-fallback) — the code path that
+    # consumes them treats a blank answer as a failure when one was
+    # expected (see verify_dimension_image), but forcing the model to at
+    # least attempt an answer every time, rather than silently omitting a
+    # perceptually-hard field, is the first line of defense against the
+    # exact gap that let product 27913 ship with Height and Breadth's
+    # arrows swapped.
+    "required": ["arrows_found", "valid", "arrow_count", "reason",
+                "longest_horizontal_arrow_label", "overall_longest_arrow_label"],
 }
 
 # Matches the brief's requested enum (section 13) — populated deterministically
@@ -2162,6 +2521,28 @@ FAILURE_TEXT_MISMATCH = "WRONG_DIMENSION_VALUE"
 FAILURE_AXIS_SWAP = "LENGTH_BREADTH_AXIS_SWAP"
 FAILURE_GEOMETRY_MISMATCH = "GEOMETRY_MISMATCH"
 FAILURE_SCALE_MISMATCH = "SCALE_MISMATCH"
+# Wrong/redesigned product or an invented part/accessory/color not backed by
+# the reference photo or product facts — the single non-negotiable check
+# (see verify_generated_image_generic's same_product/invented_details
+# fields): a generated image failing THIS is never "close enough", unlike a
+# cosmetic framing issue, so process_slot_task treats it (and
+# FAILURE_SCALE_MISMATCH) as grounds to fall back to a plain alternate photo
+# for a Lifestyle slot rather than ship a known-wrong scene.
+FAILURE_PRODUCT_AUTHENTICITY = "PRODUCT_AUTHENTICITY"
+
+# 1.5x oversized / 0.6x undersized. known_length_cm is only ever computed
+# for a confirmed rigid, non-soft/foldable product (is_soft_foldable_product
+# excludes everything else upstream in process_slot_task) — so the
+# legitimate "worn/unfolded looks bigger than boxed" gap a soft good would
+# have never reaches this check at all, and the band doesn't need to be
+# widened to accommodate it. Tightened from an earlier 0.5x-2.0x (which let
+# a product rendered at nearly DOUBLE its real size pass) down to this —
+# still a real margin for the verifier's own visual-estimate imprecision,
+# but tight enough to actually catch a "product looks bigger than it really
+# is" defect like the Hot Wheels case this was built for (~7.5 cm shown as
+# ~18-20 cm, ~2.5x) instead of only catching more extreme misses.
+def is_scale_ratio_mismatch(ratio: float) -> bool:
+    return ratio > 1.5 or ratio < 0.6
 
 
 def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: str,
@@ -2336,37 +2717,74 @@ def verify_dimension_image(image_bytes: bytes, axis_labels: list, project_id: st
         # edge, because folding "perceive" + "apply this specific logic"
         # into one holistic verdict let the logic silently fail even when
         # the underlying perception (if asked for directly) would show it.
+        # BUG FOUND (product 27913, a real 19x9x58cm guitar box rendered with
+        # Height 58cm on the SHORTEST edge and Breadth 9cm on the LONGEST):
+        # every branch below only acted when the model's report was non-empty
+        # ("if reported and ..."/"if overall_reported and ...") — none of
+        # these fields are in DIMENSION_VERIFY_SCHEMA's "required" list, so
+        # the verifier could (and did) leave them blank, which silently
+        # SKIPPED the exact swap-detection check that exists for this, and
+        # the image passed on attempt 1 with a real, visible axis swap. A
+        # missing answer where one was expected must now fail closed (be
+        # treated as unverified) instead of being treated as "nothing to
+        # check" — every branch below now handles the empty case explicitly.
         if expected_longest_name:
             wheel_reported = (parsed.get("wheel_direction_arrow_label") or "").strip()
-            if is_vehicle and expect_length_on_wheels and wheel_reported:
+            horiz_reported = (parsed.get("longest_horizontal_arrow_label") or "").strip()
+            if is_vehicle and expect_length_on_wheels:
                 # Name-based check: "Length" must be the one on the wheels,
                 # by definition, regardless of magnitude — matches the
                 # generation-side instruction (see build_generation_prompt).
-                if wheel_reported.split()[0].lower() != "length":
+                if not wheel_reported:
+                    valid = False
+                    failure_categories.append(FAILURE_AXIS_SWAP)
+                    reason = (f"axis_swap_detected: verifier did not report which arrow runs "
+                             f"along the wheels — treating a missing answer as unverified "
+                             f"rather than silently passing. ({reason})")
+                elif wheel_reported.split()[0].lower() != "length":
                     valid = False
                     failure_categories.append(FAILURE_AXIS_SWAP)
                     reason = (f"axis_swap_detected: model reported '{wheel_reported}' as "
                              f"running along the wheels (front-to-back), but 'Length' is "
                              f"defined as that measurement for a vehicle regardless of "
                              f"which number is bigger. ({reason})")
-            elif is_vehicle and wheel_reported:
-                if wheel_reported.split()[0].lower() != expected_longest_name.lower():
+            elif is_vehicle:
+                if not wheel_reported:
+                    valid = False
+                    failure_categories.append(FAILURE_AXIS_SWAP)
+                    reason = (f"axis_swap_detected: verifier did not report which arrow runs "
+                             f"along the wheels — treating a missing answer as unverified "
+                             f"rather than silently passing. ({reason})")
+                elif wheel_reported.split()[0].lower() != expected_longest_name.lower():
                     valid = False
                     failure_categories.append(FAILURE_AXIS_SWAP)
                     reason = (f"axis_swap_detected: model reported '{wheel_reported}' as "
                              f"running along the wheels, but '{expected_longest_name}' has "
                              f"the larger number and should align with the wheels. ({reason})")
             else:
-                reported = (parsed.get("longest_horizontal_arrow_label") or "").strip()
-                if reported and reported.split()[0].lower() != expected_longest_name.lower():
+                if not horiz_reported:
                     valid = False
                     failure_categories.append(FAILURE_AXIS_SWAP)
-                    reason = (f"axis_swap_detected: model reported '{reported}' as the "
+                    reason = (f"axis_swap_detected: verifier did not report which horizontal "
+                             f"arrow is visually longest — treating a missing answer as "
+                             f"unverified rather than silently passing. ({reason})")
+                elif horiz_reported.split()[0].lower() != expected_longest_name.lower():
+                    valid = False
+                    failure_categories.append(FAILURE_AXIS_SWAP)
+                    reason = (f"axis_swap_detected: model reported '{horiz_reported}' as the "
                              f"visually longest horizontal arrow, but '{expected_longest_name}' "
                              f"has the larger number and should be longest. ({reason})")
         if expected_overall_longest_name:
             overall_reported = (parsed.get("overall_longest_arrow_label") or "").strip()
-            if overall_reported and overall_reported.split()[0].lower() != expected_overall_longest_name.lower():
+            if not overall_reported:
+                valid = False
+                failure_categories.append(FAILURE_GEOMETRY_MISMATCH)
+                reason = (f"geometry_mismatch: verifier did not report which arrow is overall "
+                         f"longest even though the real numbers make this unambiguous "
+                         f"('{expected_overall_longest_name}' should clearly be longest) — "
+                         f"treating a missing answer as unverified rather than silently "
+                         f"passing. ({reason})")
+            elif overall_reported.split()[0].lower() != expected_overall_longest_name.lower():
                 valid = False
                 failure_categories.append(FAILURE_GEOMETRY_MISMATCH)
                 reason = (f"geometry_mismatch: model reported '{overall_reported}' as the "
@@ -2468,6 +2886,30 @@ def _to_cm(value: "float | None", unit: str) -> "float | None":
     return value * _CM_PER_UNIT.get((unit or "cm").strip().lower(), 1.0)
 
 
+_AMBIGUOUS_DIMENSION_NUMBER_RE = re.compile(r"[\d.]+")
+_AMBIGUOUS_DIMENSION_UNIT_RE = re.compile(r"([a-zA-Z]+)\s*$")
+
+
+def _ambiguous_longest_dimension_cm(raw_text: str) -> "float | None":
+    """A Lifestyle scale check only needs the product's longest physical
+    edge, in cm — unlike the Size/Dimensions slot's arrow chart, it does
+    NOT need to know WHICH axis (Length vs Breadth vs Height) that number
+    belongs to. classify_dimensions() correctly refuses to build a labeled
+    arrow diagram from AMBIGUOUS data (unproven axis order), but real
+    numbers with no proven order are still perfectly usable here: whichever
+    of the 2-3 numbers is biggest IS the longest edge regardless of which
+    word the admin wrote next to it. Restricting the scale check to only
+    VERIFIED data (as before) meant most products with an unlabeled
+    "Dimensions / Size: 20 x 15 x 2 cm" got NO lifestyle scale check at all.
+    Returns None if raw_text has no parseable numbers."""
+    numbers = [float(n) for n in _AMBIGUOUS_DIMENSION_NUMBER_RE.findall(raw_text or "")]
+    if not numbers:
+        return None
+    unit_match = _AMBIGUOUS_DIMENSION_UNIT_RE.search((raw_text or "").strip())
+    unit = unit_match.group(1) if unit_match else ""
+    return _to_cm(max(numbers), unit)
+
+
 # Every slot EXCEPT Size/Dimensions used to ship after a single ungated
 # generation call — verify_dimension_image only ever covered dimensions.
 # This is the equivalent gate for everything else (feature, lifestyle,
@@ -2546,6 +2988,24 @@ GENERIC_VERIFY_SCHEMA = {
                            "specific anchor used (e.g. \"child's hand\", \"the seated "
                            "child's height\") and the real-world size assumed for it."),
         },
+        "duplicate_product_instance": {
+            "type": "BOOLEAN",
+            "description": ("Only relevant for a scene-type image (Lifestyle, Learning, "
+                           "Skills, Action) that places the product in a real-world "
+                           "setting with people: true only if a SECOND physical instance "
+                           "of this SAME product is visible anywhere else in the scene — "
+                           "for example the product held loose in one person's hands AND "
+                           "the same product also visible elsewhere, boxed or unboxed. "
+                           "False if only one instance of the product appears, and false "
+                           "for any non-scene slot type."),
+        },
+        "box_shown_damaged": {
+            "type": "BOOLEAN",
+            "description": ("True if the product's retail box/packaging is visible "
+                           "anywhere in the SECOND image and appears torn, ripped, cut "
+                           "open, crushed, or otherwise damaged. False if no box is shown, "
+                           "or the box shown is fully intact."),
+        },
         "valid": {"type": "BOOLEAN"},
         "reason": {"type": "STRING"},
     },
@@ -2586,6 +3046,16 @@ def verify_generated_image_generic(image_bytes: bytes, reference_bytes: bytes,
             f"defect this check exists to catch."
         )
     variation_note = f"\n\nThis image was specifically requested to show: {forced_variation}." if forced_variation else ""
+    duplicate_note = ""
+    if any(k in image_type.lower() for k in ("lifestyle", "learning", "skills", "action")):
+        duplicate_note = (
+            "\n\nThis is a real-world scene shot. Check carefully whether the SAME "
+            "product physically appears more than once in the scene (e.g. one loose "
+            "in a person's hands and another instance still boxed elsewhere) — fill "
+            "in duplicate_product_instance accordingly. Also check whether the "
+            "product's box/packaging, if shown anywhere in the scene, looks torn, "
+            "ripped, or damaged — fill in box_shown_damaged accordingly."
+        )
     scale_note = ""
     if known_length_cm is not None:
         scale_note = (
@@ -2613,7 +3083,7 @@ def verify_generated_image_generic(image_bytes: bytes, reference_bytes: bytes,
         f"do not accept a feature or part that isn't backed by this text or clearly "
         f"visible in the reference image):\n{description[:800]}\n"
         f"{('Specification section: ' + specifications[:800]) if specifications else ''}\n\n"
-        f"This image's slot type is: {image_type}.{variation_note}{exclude_note}{scale_note}\n\n"
+        f"This image's slot type is: {image_type}.{variation_note}{exclude_note}{scale_note}{duplicate_note}\n\n"
         f"Compare the two images carefully and fill in every field. Set valid=true only "
         f"if same_product is true, invented_details is empty, and (when "
         f"feature_highlighted is filled in) feature_supported_by_product_facts is true."
@@ -2649,16 +3119,19 @@ def verify_generated_image_generic(image_bytes: bytes, reference_bytes: bytes,
         parsed = json.loads(text)
         valid = bool(parsed.get("valid"))
         reason = parsed.get("reason", "")
+        failure_categories = []
         # Deterministic overrides — same pattern as verify_dimension_image:
         # check the raw perceptual fields ourselves rather than fully
         # trusting the model's own combined "valid" verdict.
         if not parsed.get("same_product", True):
             valid = False
             reason = f"wrong_or_altered_product: {reason}"
+            failure_categories.append(FAILURE_PRODUCT_AUTHENTICITY)
         invented = parsed.get("invented_details") or []
         if invented:
             valid = False
             reason = f"invented_details_detected {invented}: {reason}"
+            failure_categories.append(FAILURE_PRODUCT_AUTHENTICITY)
         feature_highlighted = (parsed.get("feature_highlighted") or "").strip()
         if feature_highlighted and not parsed.get("feature_supported_by_product_facts", True):
             valid = False
@@ -2666,22 +3139,17 @@ def verify_generated_image_generic(image_bytes: bytes, reference_bytes: bytes,
         if not parsed.get("packaging_matches", True):
             valid = False
             reason = f"packaging_mismatch: {reason}"
-        failure_categories = []
+        if parsed.get("duplicate_product_instance"):
+            valid = False
+            reason = f"duplicate_product_instance_in_scene: {reason}"
+        if parsed.get("box_shown_damaged"):
+            valid = False
+            reason = f"box_shown_damaged: {reason}"
         if (known_length_cm and parsed.get("scale_reference_present")
                 and parsed.get("product_estimated_length_cm")):
             estimated = parsed["product_estimated_length_cm"]
             ratio = estimated / known_length_cm
-            # Band widened to 0.5x-2.0x after a real false positive: a fabric
-            # cape's admin "Dimensions" is its FOLDED/BOXED size, so a child
-            # actually wearing it unfolded genuinely looks ~1.5x that size —
-            # correct, not a defect. A rigid product (the Hot Wheels case
-            # this was built for) doesn't have that legitimate gap, so 2.0x
-            # still catches a real, clear mismatch without flagging normal
-            # folded-vs-worn variance for soft goods (see the scale_note
-            # prompt text below, which now tells the model this explicitly
-            # too — this threshold is deliberately a second, generous safety
-            # margin on top of that, not the only line of defense).
-            if ratio > 2.0 or ratio < 0.5:
+            if is_scale_ratio_mismatch(ratio):
                 valid = False
                 direction = "oversized" if ratio > 1 else "undersized"
                 reason = (
@@ -2693,6 +3161,429 @@ def verify_generated_image_generic(image_bytes: bytes, reference_bytes: bytes,
         return {"valid": valid, "reason": reason, "failure_categories": failure_categories}
     except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError) as e:
         return {"valid": True, "reason": f"verification_error: {e}"}
+
+
+# ---------------------------------------------------------------------------
+# Deterministic dimension pipeline: generate a CLEAN product image (no
+# arrows/text at all), find its real corners with classical OpenCV contour
+# detection, and draw the measurement arrows/labels with PIL — instead of
+# asking the generative model to both preserve the product AND draw exact
+# arrows/numbers on it in one pass, which is what produced every axis-swap
+# and wrong-angle dimension defect this session (products 5344, 35806,
+# 27913, ...).
+#
+# An earlier prototype tried the "find the corners" step by asking a vision
+# LLM for pixel coordinates directly — that failed 2/2 live tests, landing
+# points in empty background instead of on the product, because precise
+# pixel localization is a known weak spot for these models. Classical CV
+# (threshold/segment the plain background away, trace the actual contour)
+# doesn't have that weakness — it's pixel math, not perception — confirmed
+# on 2/2 real generated product images in live testing.
+#
+# This is intentionally NOT a wholesale replacement of the existing
+# model-drawn-arrows + verify/retry system: every step here can fail
+# (segmentation uncertain, corners don't resolve into 3 clean axes, etc.),
+# and on ANY uncertainty this deliberately returns None/False so the caller
+# falls back to the existing, already-proven path unchanged. Opportunistic
+# improvement, zero regression risk.
+# ---------------------------------------------------------------------------
+
+CLEAN_PRODUCT_BACKGROUND_RULE = (
+    "Show the product on a PERFECTLY FLAT, solid, plain white or very light "
+    "gray background — no gradient, no vignette, no shadow darkening toward "
+    "the edges or corners, no studio backdrop texture. This background must "
+    "be uniform enough that a simple pixel-brightness threshold could "
+    "separate the product from it automatically — an automated measurement "
+    "step run after this image is generated depends on that. "
+    "Do NOT draw, print, or overlay any arrows, lines, measurement labels, "
+    "numbers, or any added text anywhere in this image — show ONLY the "
+    "clean product itself. Fill the entire square canvas edge to edge."
+)
+
+# A real generated "clean" image (product 27731, a Hot Wheels car) came back
+# technically correct — right product, flat background, no arrows — but
+# rendered SMALL in the middle of the canvas with large empty margins on
+# every side, like a normal breathing-room product shot. The automatic
+# corner-detection step that runs on this image then only had a small
+# cluster of pixels to work with, so the arrows/labels it computed came out
+# tiny and cramped/overlapping in the final image — a defect in FRAME
+# COMPOSITION, not in the detection or drawing logic. This is the opposite
+# instruction from FRAMING_RULE's generous-margin guidance used elsewhere —
+# deliberately, since precise pixel-level corner detection needs the product
+# as LARGE as possible, not comfortably small.
+CLEAN_PRODUCT_FILL_FRAME_RULE = (
+    "The product must be the DOMINANT, LARGE subject of this image — zoom in "
+    "as close as possible so it fills at least 80% of the canvas width or "
+    "height (whichever is its longer visible dimension), with only a small "
+    "margin of background visible around it. Do NOT render it small or "
+    "distant with large empty white space on all sides like a normal "
+    "breathing-room product photo — a small product in a mostly-empty frame "
+    "gives an automated measurement step too few pixels to work with, "
+    "producing cramped, unreadable measurement arrows and labels. The "
+    "product must still be fully inside the frame, not cropped or touching "
+    "the edge — maximize its size within that constraint, err on the side of "
+    "too large/close rather than too small/distant."
+)
+
+
+def build_clean_dimension_prompt(product_name: str, category: str, description: str,
+                                 specifications: str, layout_plan: dict) -> str:
+    """Prompt for the deterministic pipeline's first step: a clean product
+    shot (no arrows/labels at all) suitable for automatic corner detection.
+    Deliberately separate from build_generation_prompt (rather than another
+    branch inside it) so the existing, proven arrow-drawing prompt path is
+    never at risk of being disturbed by this new one.
+    """
+    is_boxed = (is_boxed_multipiece_product(category, product_name, description, specifications)
+               or is_typically_boxed_single_item(category, product_name, description, specifications))
+    shape_note = ""
+    if is_boxed:
+        shape_note = (
+            " This product is normally sold sealed in retail box/blister "
+            "packaging — show it in its CLOSED, SEALED packaging (as it "
+            "would look on a store shelf), as ONE single solid consolidated "
+            "shape, not the loose item(s) removed, opened, or scattered "
+            "around it — automatic corner detection needs one clean solid "
+            "silhouette, not several separate pieces with gaps between them."
+        )
+    orientation = (layout_plan or {}).get("orientation", "three_quarter_corner")
+    if orientation == "side_profile":
+        camera_note = (
+            " Camera: strict SIDE-PROFILE view, positioned directly to the "
+            "side and perpendicular to the product's length, so its full "
+            "silhouette is visible edge-on with no foreshortening."
+        )
+    elif orientation == "flat_front_on":
+        camera_note = " Camera: flat, face-on view, product's full front face parallel to the camera."
+    else:
+        camera_note = (
+            " Camera: 3/4 CORNER perspective — position the camera so ONE "
+            "bottom corner of the product is closest to the viewer, with "
+            "both adjacent bottom edges receding away from that corner at "
+            "an angle, and the vertical edge rising from that same corner "
+            "also visible (a classic product-dimension-diagram angle)."
+        )
+    context = f"Product: {product_name} (category: {category})"
+    if description:
+        context += f"\nDescription: {description[:600]}"
+    if specifications:
+        context += f"\nSpecifications: {specifications[:600]}"
+    return (
+        f"{context}\n\n"
+        f"STRICT RULE: Preserve the exact product from the reference photo "
+        f"— same shape, colors, materials, printed artwork, and proportions. "
+        f"Do not invent, add, or remove any part.{shape_note}{camera_note}\n\n"
+        f"{CLEAN_PRODUCT_BACKGROUND_RULE}\n\n"
+        f"{CLEAN_PRODUCT_FILL_FRAME_RULE}\n\n"
+        f"Composition: 1:1 square canvas, high resolution, realistic "
+        f"photography, clean professional catalog style, no watermark."
+    )
+
+
+def _detect_product_corners_cv_worker(image_bytes: bytes, conn) -> None:
+    """Runs in a separate PROCESS (see detect_product_corners_cv) — never
+    called directly."""
+    try:
+        result = _detect_product_corners_cv_impl(image_bytes)
+    except Exception:
+        result = None
+    try:
+        conn.send(result)
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
+def detect_product_corners_cv(image_bytes: bytes, _timeout_seconds: float = 20.0) -> "dict | None":
+    """Classical CV corner detection on a clean (no-arrows) product image.
+    Returns {"polygon": [[x,y],...], "near_idx": i, ...} on a confident
+    detection, or None if any sanity check fails — callers MUST treat None
+    as "fall back to the existing model-drawn-arrows path", never guess.
+
+    BUG FOUND (live test): an earlier version of this ran the work in a
+    background THREAD with a timeout via concurrent.futures. That looked
+    right but didn't actually work — cv2.grabCut apparently never releases
+    the GIL during its C++ computation on some inputs (confirmed live: a
+    car rendered small against a large flat background made grabCut run for
+    minutes), so the MAIN thread waiting on future.result(timeout=20)
+    couldn't even get scheduled to notice the timeout had elapsed until the
+    background call finally finished on its own — the exact stall this was
+    supposed to prevent. A separate PROCESS doesn't have this problem: the
+    OS can forcibly terminate it after the timeout regardless of what its
+    C code is doing internally, which is what an unreliable local
+    computation step genuinely needs (same "don't trust it, verify it can
+    actually be cut off" lesson as everything else in this pipeline).
+    """
+    import multiprocessing
+    ctx = multiprocessing.get_context("spawn")
+    parent_conn, child_conn = ctx.Pipe(duplex=False)
+    proc = ctx.Process(target=_detect_product_corners_cv_worker, args=(image_bytes, child_conn))
+    proc.start()
+    child_conn.close()
+    proc.join(timeout=_timeout_seconds)
+    if proc.is_alive():
+        proc.terminate()
+        proc.join(timeout=3)
+        if proc.is_alive():
+            proc.kill()
+            proc.join()
+        return None
+    result = parent_conn.recv() if parent_conn.poll() else None
+    parent_conn.close()
+    return result
+
+
+def _detect_product_corners_cv_impl(image_bytes: bytes) -> "dict | None":
+    arr = np.frombuffer(image_bytes, np.uint8)
+    img = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if img is None:
+        return None
+    h, w = img.shape[:2]
+    frame_area = w * h
+
+    # GrabCut (graph-cut foreground/background segmentation) rather than a
+    # brightness threshold or flood-fill — both of those broke on a real
+    # generated image (a vignette background darker than assumed fooled a
+    # fixed threshold; flood-fill from the corners leaked straight through
+    # the product's OWN white packaging patches into the background on the
+    # far side). GrabCut models foreground/background color distributions
+    # instead of a purely local brightness rule, so it isn't fooled by an
+    # isolated light patch inside the product.
+    margin_frac = 0.03
+    rect = (int(w * margin_frac), int(h * margin_frac),
+           int(w * (1 - 2 * margin_frac)), int(h * (1 - 2 * margin_frac)))
+    bgd_model = np.zeros((1, 65), np.float64)
+    fgd_model = np.zeros((1, 65), np.float64)
+    gc_mask = np.zeros((h, w), np.uint8)
+    try:
+        cv2.grabCut(img, gc_mask, rect, bgd_model, fgd_model, 5, cv2.GC_INIT_WITH_RECT)
+    except cv2.error:
+        return None
+    product_mask = np.where((gc_mask == cv2.GC_FGD) | (gc_mask == cv2.GC_PR_FGD),
+                            255, 0).astype(np.uint8)
+    kernel = np.ones((15, 15), np.uint8)
+    closed = cv2.morphologyEx(product_mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+
+    contours, _ = cv2.findContours(closed, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    largest = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(largest)
+    # Too large (>85%) means segmentation likely failed to separate a real
+    # background at all (traced the frame/vignette, not the product) — a
+    # real failure mode seen live. Too small (<3%) means the product wasn't
+    # found / mask is noise.
+    if area > 0.85 * frame_area or area < 0.03 * frame_area:
+        return None
+    x, y, bw, bh = cv2.boundingRect(largest)
+    edge_margin = 3
+    touches = sum([x <= edge_margin, y <= edge_margin,
+                  (x + bw) >= w - edge_margin, (y + bh) >= h - edge_margin])
+    if touches >= 3:
+        # Bounding box hugging 3+ image edges is not a real, centered
+        # product shot — almost certainly background leakage.
+        return None
+    # BUG FOUND (product 27731, live test): the prompt asked for the product
+    # to be prominent, but a real generation still came back small and
+    # centered with large empty margins on every side — technically correct
+    # (right product, flat background, no arrows) but far too few real
+    # pixels for precise corner detection, producing cramped/overlapping
+    # arrows and labels in the final image. A prompt instruction alone isn't
+    # a guarantee (the same lesson as SQUARE_CANVAS_RULE needing
+    # imageConfig.aspectRatio behind it) — deterministically reject a
+    # too-small product here too, not just too-large/leaked segmentation,
+    # so a small render safely falls back to the proven model-drawn path
+    # instead of shipping cramped, hard-to-read measurements.
+    if max(bw, bh) < 0.45 * min(w, h):
+        return None
+
+    peri = cv2.arcLength(largest, True)
+    approx = None
+    for eps_frac in (0.01, 0.02, 0.03, 0.04, 0.05, 0.06):
+        candidate = cv2.approxPolyDP(largest, eps_frac * peri, True)
+        if 4 <= len(candidate) <= 8:
+            approx = candidate
+            break
+    if approx is None or len(approx) < 4:
+        return None
+    pts = approx.reshape(-1, 2)
+    n = len(pts)
+    near_idx = int(np.argmax(pts[:, 1]))
+    return {
+        "polygon": pts.tolist(), "near_idx": near_idx,
+        "prev_idx": (near_idx - 1) % n, "next_idx": (near_idx + 1) % n,
+        "image_w": w, "image_h": h,
+    }
+
+
+def _edge_angle_deg(p1, p2) -> float:
+    """0 = perfectly horizontal, 90 = perfectly vertical (unsigned acute
+    angle from horizontal, regardless of which quadrant the edge points
+    into) — atan2's raw range is (-180, 180], so an edge pointing into the
+    third quadrant (both dx and dy negative) came back as e.g. -150 degrees,
+    whose abs() (150) is NOT the acute angle from horizontal (it's actually
+    a fairly horizontal 30-degree edge pointing the other way) — folding
+    anything over 90 back down is required, not optional."""
+    dx, dy = p2[0] - p1[0], p2[1] - p1[1]
+    angle = abs(np.degrees(np.arctan2(dy, dx)))
+    return 180 - angle if angle > 90 else angle
+
+
+def assign_axes_from_corners(corner_info: dict) -> "dict | None":
+    """Maps the detected polygon around the near corner to length/breadth
+    (ground-plane, roughly horizontal) and height (roughly vertical) pixel
+    edges. Returns None (fall back) rather than guessing if the polygon
+    doesn't resolve into a confident 2-horizontal + 1-vertical set — a 3D
+    box corner has 3 real edges, but a 2D silhouette vertex only ever shows
+    2 adjacent boundary edges, so the third (usually height, for a box
+    lying with a small height) has to be found one hop further around the
+    polygon, not assumed to touch the near corner directly.
+    """
+    pts = corner_info["polygon"]
+    n = len(pts)
+    near_idx = corner_info["near_idx"]
+    near = pts[near_idx]
+
+    candidates = []
+    for start_off, end_off in ((0, 1), (0, -1), (1, 2), (-1, -2)):
+        i1 = (near_idx + start_off) % n
+        i2 = (near_idx + end_off) % n
+        if i1 == i2:
+            continue
+        p1, p2 = pts[i1], pts[i2]
+        length = float(np.hypot(p2[0] - p1[0], p2[1] - p1[1]))
+        if length < 15:
+            continue
+        angle = _edge_angle_deg(p1, p2)
+        d1 = np.hypot(p1[0] - near[0], p1[1] - near[1])
+        d2 = np.hypot(p2[0] - near[0], p2[1] - near[1])
+        near_end, far_end = (p1, p2) if d1 < d2 else (p2, p1)
+        candidates.append({"near_end": near_end, "far_end": far_end,
+                           "length": length, "angle": angle})
+
+    horiz = sorted((c for c in candidates if c["angle"] < 55), key=lambda c: -c["length"])
+    vert = sorted((c for c in candidates if c["angle"] >= 55), key=lambda c: -c["length"])
+    if len(horiz) < 2 or len(vert) < 1:
+        return None
+    ground_sorted = sorted(horiz[:2], key=lambda c: -c["length"])
+    height_edge = vert[0]
+    # BUG FOUND (product 35806, live test): a 2-hop candidate edge (needed
+    # for height on a box whose near corner has no directly-attached
+    # vertical silhouette edge) does NOT touch the true near corner at all
+    # — its own "near_end" is just whichever of ITS OWN two endpoints is
+    # closer to the near corner, not the near corner itself. Returning only
+    # a single shared "near_corner" and forcing every axis's arrow to start
+    # there drew a bogus diagonal line cutting straight across the box for
+    # any 2-hop axis, completely missing its real edge. Each axis now
+    # carries its OWN near/far pair from its own candidate edge — 3
+    # independent arrows, each following one real product edge, rather than
+    # 3 arrows forced to fan out from one single shared point.
+    return {
+        "length": {"near": list(map(int, ground_sorted[0]["near_end"])),
+                  "far": list(map(int, ground_sorted[0]["far_end"])),
+                  "px": ground_sorted[0]["length"]},
+        "breadth": {"near": list(map(int, ground_sorted[1]["near_end"])),
+                   "far": list(map(int, ground_sorted[1]["far_end"])),
+                   "px": ground_sorted[1]["length"]},
+        "height": {"near": list(map(int, height_edge["near_end"])),
+                  "far": list(map(int, height_edge["far_end"])),
+                  "px": height_edge["length"]},
+    }
+
+
+def draw_dimension_arrows_deterministic(image_path: str, axes: dict, dim_data: dict) -> None:
+    """Overwrites image_path in place with deterministically-drawn
+    measurement arrows + labels, using REAL detected pixel coordinates
+    (axes) and REAL admin numbers (dim_data) — no generative model text
+    rendering involved anywhere, so no swapped axes, no misspelled labels,
+    no corrupted numbers (all defects the model-drawn approach hit)."""
+    img = Image.open(image_path).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    # Pillow's built-in default font (load_default(size=...), Pillow >=10.1),
+    # not a named system font path — a hardcoded macOS font path here would
+    # simply not exist on the GCP Linux instance this actually runs on (same
+    # reasoning as add_size_disclaimer already documents).
+    font_size = max(24, img.size[0] // 40)
+    font = ImageFont.load_default(size=font_size)
+    unit = dim_data.get("unit") or "cm"
+
+    def _draw_one(axis, label_name, value):
+        if value is None or axis is None:
+            return
+        near = tuple(axis["near"])
+        far = tuple(axis["far"])
+        draw.line([near, far], fill=(20, 20, 20), width=4)
+        vx, vy = far[0] - near[0], far[1] - near[1]
+        norm = max((vx**2 + vy**2) ** 0.5, 1e-6)
+        vx, vy = vx / norm, vy / norm
+        perp = (-vy, vx)
+        for end, direction in ((near, 1), (far, -1)):
+            tip = end
+            base1 = (end[0] - vx * direction * 14 + perp[0] * 7,
+                    end[1] - vy * direction * 14 + perp[1] * 7)
+            base2 = (end[0] - vx * direction * 14 - perp[0] * 7,
+                    end[1] - vy * direction * 14 - perp[1] * 7)
+            draw.polygon([tip, base1, base2], fill=(20, 20, 20))
+
+        # Offset the label perpendicular to the arrow line (not centered ON
+        # it) with a solid white background box behind the text — without
+        # this, a real test render had the line cutting straight through
+        # the label text, making it hard to read at a glance.
+        mid = ((near[0] + far[0]) / 2, (near[1] + far[1]) / 2)
+        offset = 28
+        text_x = mid[0] + perp[0] * offset
+        text_y = mid[1] + perp[1] * offset
+        text = f"{label_name} {value:g} {unit}"
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        box_x = text_x - text_w / 2
+        box_y = text_y - text_h / 2
+        pad = 6
+        draw.rectangle([box_x - pad, box_y - pad, box_x + text_w + pad, box_y + text_h + pad],
+                       fill=(255, 255, 255))
+        draw.text((box_x, box_y), text, fill=(20, 20, 20), font=font)
+
+    _draw_one(axes.get("length"), "Length", dim_data.get("length"))
+    _draw_one(axes.get("breadth"), "Breadth", dim_data.get("breadth"))
+    _draw_one(axes.get("height"), "Height", dim_data.get("height"))
+    img.save(image_path)
+
+
+def try_deterministic_dimension_image(reference_url: str, product_name: str, category: str,
+                                      description: str, specifications: str, layout_plan: dict,
+                                      dim_data: dict, out_path: str, project_id: str, region: str,
+                                      tokens: "VertexTokenProvider") -> bool:
+    """Attempts the full deterministic pipeline for one dimension slot.
+    Returns True and leaves a finished, disclaimer-free dimension image at
+    out_path on confident success; False (out_path's contents undefined) on
+    ANY uncertainty, in which case the caller falls back to the existing
+    model-drawn-arrows + verify/retry system unchanged.
+    """
+    prompt = build_clean_dimension_prompt(product_name, category, description,
+                                         specifications, layout_plan)
+    result = generate_image(reference_url, prompt, out_path, project_id, region, tokens)
+    if result["status"] != "generated":
+        return False
+    try:
+        with open(out_path, "rb") as f:
+            image_bytes = f.read()
+    except OSError:
+        return False
+    shape_check = check_square_and_min_px(image_bytes, MIN_OUTPUT_PX)
+    if not shape_check["valid"]:
+        return False
+    corners = detect_product_corners_cv(image_bytes)
+    if corners is None:
+        return False
+    axes = assign_axes_from_corners(corners)
+    if axes is None:
+        return False
+    try:
+        draw_dimension_arrows_deterministic(out_path, axes, dim_data)
+    except Exception:
+        return False
+    return True
 
 
 MAX_GENERATION_ATTEMPTS = 3
@@ -2743,6 +3634,15 @@ def build_retry_feedback_text(failure_categories: list, reason: str, layout_plan
             "smaller or larger (per the failure reason above) so its size "
             "relative to that person/object genuinely matches its real listed "
             "dimensions, not an enlarged or shrunk 'hero' size."
+        )
+    if FAILURE_PRODUCT_AUTHENTICITY in cats:
+        lines.append(
+            "- The product itself was wrong: either it no longer matches the "
+            "reference photo's real shape/color/parts/branding, or it now shows "
+            "a part, accessory, or design element the reference photo and "
+            "product facts do not support. Re-render the EXACT same physical "
+            "product as the reference image — same shape, proportions, color, "
+            "material, and parts — and remove anything invented."
         )
     if len(lines) == 3:
         lines.append("- Address the specific problem described in PREVIOUS QC FAILURE above.")
@@ -2817,8 +3717,9 @@ def generate_image_with_verification(reference_url: str, prompt: str, out_path: 
             image_bytes = f.read()
         shape_check = check_square_and_min_px(image_bytes, MIN_OUTPUT_PX)
         if not shape_check["valid"]:
-            last_result = {"status": f"generated_unverified: {shape_check['reason']}"}
             last_failure_categories, last_reason = ["OTHER"], shape_check["reason"]
+            last_result = {"status": f"generated_unverified: {shape_check['reason']}",
+                           "failure_categories": last_failure_categories}
             if attempt_log_fn:
                 attempt_log_fn(attempt, {"valid": False, "reason": shape_check["reason"],
                                         "failure_categories": ["OTHER"]})
@@ -2848,9 +3749,13 @@ def generate_image_with_verification(reference_url: str, prompt: str, out_path: 
             return result
         last_failure_categories = verdict.get("failure_categories", [])
         last_reason = verdict.get("reason", "")
-        last_result = {"status": f"generated_unverified: {verdict['reason']}"}
+        last_result = {"status": f"generated_unverified: {verdict['reason']}",
+                       "failure_categories": last_failure_categories}
     # Ran out of attempts — last_result is either a real generation failure
-    # or "generated_unverified" (file on disk, just never passed the check).
+    # or "generated_unverified" (file on disk, just never passed the check),
+    # in which case it carries failure_categories from the LAST attempt so a
+    # caller (process_slot_task's Lifestyle scale/authenticity fallback) can
+    # act on WHICH check kept failing, not just that something did.
     return last_result
 
 
@@ -3005,7 +3910,17 @@ def build_slot_tasks(merged: pd.DataFrame, rules: RuleMaster, image_out_dir: str
 
         covered = parse_slot_map(row.get("Covered_Slots", ""))
         missing_slot_nums = set(parse_slot_map(row.get("Missing_Slots", "")))
-        reference_url = pick_reference_image(covered, split_image_urls(row.get("Image_URLs", "")))
+        image_urls = split_image_urls(row.get("Image_URLs", ""))
+        reference_url = pick_reference_image(covered, image_urls)
+        try:
+            reference_quality = json.loads(row.get("Reference_Quality") or "{}")
+        except (json.JSONDecodeError, TypeError):
+            # Absent/older classification_result.csv without this column —
+            # build_reference_set treats an empty dict as "no quality data,
+            # trust every covered image", i.e. exactly the pre-existing
+            # behavior, never a crash.
+            reference_quality = {}
+        reference_set = build_reference_set(covered, slots, image_urls, reference_quality)
         slot_variations, feature_positions = assign_slot_variations(slots, missing_slot_nums)
 
         for slot_num in sorted(slots):
@@ -3020,6 +3935,7 @@ def build_slot_tasks(merged: pd.DataFrame, rules: RuleMaster, image_out_dir: str
                 "covered_url": covered.get(slot_num),
                 "in_missing": slot_num in missing_slot_nums,
                 "reference_url": reference_url,
+                "reference_set": reference_set,
                 "rule_category": rule_category,
                 "product_id": str(row["Product_ID"]),
                 "sku": row["SKU"],
@@ -3081,13 +3997,34 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
     if not task["reference_url"]:
         return {**row_base, "Status": "failed_no_reference_image", "_bucket": "Failed"}
 
+    # Per-slot reference — a "Box Back Content" slot uses a real packaging
+    # photo when this product has one covering some packaging-type slot, a
+    # "Feature" slot uses a real feature-type photo, etc., instead of every
+    # slot reusing whatever single photo covers slot 1 regardless of what
+    # it actually needs to depict (see build_reference_set). Falls back to
+    # "primary" (== task["reference_url"]) when no better-suited photo
+    # exists for this specific slot — never worse than the old behavior,
+    # only better when the admin panel actually has a relevant photo.
+    slot_reference_url = pick_slot_reference(task["reference_set"], slot_info) or task["reference_url"]
+
     low_quality_reference = False
-    if task.get("reference_unverified") and reference_cache:
-        # Every existing image for this product was rejected by
-        # classify_images.py — pick_reference_image() had no validated
-        # option and fell back to the first raw URL. Assess THAT specific
-        # image before trusting it as a generation reference (see
-        # assess_reference_image's docstring).
+    if reference_cache:
+        # BUG FOUND (products 33955/39080 — admin's uploaded photo was a
+        # completely different product under the same category): this check
+        # used to only run when task["reference_unverified"] was set, i.e.
+        # only when classify_images.py had ALREADY rejected every existing
+        # image for this product. That made this safety net entirely
+        # dependent on a DIFFERENT, less rigorous classifier's opinion —
+        # classify_images.py only judges "does this photo fit slot N's
+        # generic description", and on a run where it happened to accept
+        # the wrong photo for even one slot, this identity check was never
+        # even consulted, and a fundamentally wrong reference photo was used
+        # to generate every other slot completely undetected (that's
+        # exactly what shipped in the original 952-product batch). Now runs
+        # unconditionally, once per product (ReferenceAssessmentCache still
+        # dedupes it across that product's sibling slot tasks), so a wrong
+        # reference photo is always caught, not just when another check's
+        # per-run judgment happens to also catch it.
         assessment = reference_cache.get_or_assess(
             task["product_id"], task["reference_url"], task["product_name"],
             task["description"], task["specifications"], project_id, region, tokens)
@@ -3096,14 +4033,20 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
                 "product_id": task["product_id"], "sku": task["sku"], "slot": slot_num,
                 "image_type": slot_info["image_type"],
                 "final_status": "MANUAL_REVIEW_REQUIRED",
-                "reason": (f"No usable reference image at all for this product — every "
-                          f"existing image was rejected by classification, and the only "
-                          f"remaining candidate failed identity check too: "
-                          f"{assessment.get('reason', '')}. A corrected reference photo "
-                          f"needs to be sourced/uploaded (e.g. verified against the "
-                          f"product's real listing) before this product can be generated."),
+                "reason": (f"Reference photo used for generation does not actually show "
+                          f"this product: {assessment.get('reason', '')}. A corrected "
+                          f"reference photo needs to be sourced/uploaded (e.g. verified "
+                          f"against the product's real listing) before this product can "
+                          f"be generated."),
             })
-            return {**row_base, "Status": "MANUAL_REVIEW_REQUIRED", "Image_Source": "",
+            # Image_Source carries the FLAGGED reference photo itself (not a
+            # generated deliverable) so a reviewer has something to actually
+            # click and look at — a reviewer can't act on a bare status word
+            # with nothing behind it. build_wide_summary.py labels this
+            # distinctly ("reference photo, not final") so it's never
+            # mistaken for a passing image.
+            return {**row_base, "Status": "MANUAL_REVIEW_REQUIRED",
+                   "Image_Source": task["reference_url"],
                    "GCP_Link": "", "_bucket": "Failed", "_needs_review": True,
                    "_upload_failed": False}
         low_quality_reference = assessment.get("defect_type") == "quality_only"
@@ -3174,7 +4117,53 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
     text_only_label = ""
 
     if is_dimension_slot:
+        # Rule (explicit product decision): if the admin's OWN reference
+        # photo for this slot already IS a proper labeled dimension diagram
+        # (printed numbers on arrows), that real photo is strictly more
+        # trustworthy than anything we'd generate — use it as-is instead.
+        # A dedicated check just for this slot, not the generic per-slot
+        # classifier in classify_images.py, since a miss here ships a worse
+        # result (an invented chart) than a miss on any other slot type.
+        ref_check = reference_already_shows_dimensions(
+            slot_reference_url, project_id, region, tokens)
+        if ref_check.get("has_labeled_dimensions"):
+            existing_filename = (f"{task['product_id']}_{slugify(task['sku'])}_{slot_num}_"
+                                 f"{slugify(slot_info['image_type'])}_existing_dimensions.png")
+            check = ensure_existing_image_quality(
+                slot_reference_url, existing_filename, task["image_out_dir"],
+                uploader, upload_cache, 0)
+            log_dimension_audit({
+                "product_id": task["product_id"], "sku": task["sku"], "slot": slot_num,
+                "image_type": slot_info["image_type"], "final_status": check["status"],
+                "reason": (f"Reused admin's own reference photo — already a labeled "
+                          f"dimension diagram: {ref_check.get('reason', '')}"),
+            })
+            return {**row_base, "Status": check["status"], "Image_Source": check["image_source"],
+                   "GCP_Link": check["gcp_link"], "_bucket": "Existing",
+                   "_upload_failed": check["upload_failures"] > 0}
+
         dim_data = classify_dimensions(task["description"], task["specifications"])
+        if dim_data["status"] != DIMENSION_STATUS_VERIFIED:
+            # A die-cast scale-model vehicle's real-world size can be
+            # defensibly derived from its scale ratio even when admin data
+            # is missing/unproven — see detect_diecast_scale_ratio. Only
+            # applies to a confirmed scale-model vehicle; every other
+            # product still falls through to MANUAL_REVIEW_REQUIRED below,
+            # unchanged.
+            scale_ratio = detect_diecast_scale_ratio(
+                task["rule_category"], task["product_name"],
+                task["description"], task["specifications"])
+            if scale_ratio:
+                est = estimate_diecast_dimensions_cm(scale_ratio)
+                dim_data = {
+                    "length": est["length"], "breadth": est["breadth"],
+                    "height": est["height"], "unit": "cm",
+                    "source": f"Scale-derived (1:{scale_ratio} standard estimate, not admin data)",
+                    "status": DIMENSION_STATUS_VERIFIED,
+                    "raw_text": (f"Length {est['length']} cm, Breadth {est['breadth']} cm, "
+                                f"Height {est['height']} cm"),
+                    "confidence": "estimated",
+                }
         if dim_data["status"] != DIMENSION_STATUS_VERIFIED:
             log_dimension_audit({
                 "product_id": task["product_id"], "sku": task["sku"], "slot": slot_num,
@@ -3187,14 +4176,19 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
                           if dim_data["status"] == DIMENSION_STATUS_AMBIGUOUS
                           else "No usable dimension data at all"),
             })
-            return {**row_base, "Status": "MANUAL_REVIEW_REQUIRED", "Image_Source": "",
+            # Image_Source carries the product's own reference photo (not a
+            # generated deliverable) so a reviewer can actually look at the
+            # real product while manually confirming/entering its dimensions
+            # — a bare status word with nothing to click isn't reviewable.
+            return {**row_base, "Status": "MANUAL_REVIEW_REQUIRED",
+                   "Image_Source": slot_reference_url,
                    "GCP_Link": "", "_bucket": "Failed", "_needs_review": True,
                    "_upload_failed": False}
         layout_plan = build_measurement_layout_plan(
             dim_data, task["rule_category"], task["product_name"],
             task["description"], task["specifications"])
         try:
-            ref_bytes, ref_ct = get_image_bytes(task["reference_url"])
+            ref_bytes, ref_ct = get_image_bytes(slot_reference_url)
             geometry_analysis = analyze_product_geometry(
                 ref_bytes, ref_ct, layout_plan, project_id, region, tokens)
         except (requests.RequestException, OSError):
@@ -3204,6 +4198,11 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
         # guarantees compute_axis_labels() will find these, since both are
         # derived from the same underlying admin data.
         axis_labels = compute_axis_labels(task["description"], task["specifications"])
+        if not axis_labels and dim_data.get("confidence") == "estimated":
+            # Real admin text has no axis-order hint at all for these
+            # products (that's WHY the scale-derived estimate exists) —
+            # build the checkable labels straight from that estimate.
+            axis_labels = AXIS_LABEL_RE.findall(dim_data["raw_text"])
         is_vehicle = layout_plan["product_type"] == "vehicle"
         # Keep verification in sync with what the prompt actually asked
         # for — vehicles get the side-profile 2-arrow layout (Breadth as
@@ -3218,13 +4217,18 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
     # problem: a real Hot Wheels car (~7.5 cm) came back looking ~18-20 cm
     # in a lifestyle scene — the "Scale check" note in build_generation_prompt
     # asked the model to keep it realistic, but nothing ever verified it
-    # actually did. Only act on VERIFIED dimension data (never guess a
-    # scale target from AMBIGUOUS/MISSING data) — and unlike is_dimension_slot,
-    # unverified data here just means no extra check runs, not a hard
-    # MANUAL_REVIEW_REQUIRED gate, since the measurement isn't this image's
-    # whole point.
+    # actually did. MISSING data (no numbers at all) still gets no check —
+    # there is nothing to check against — but AMBIGUOUS data (real numbers,
+    # unproven axis order) is fine to use here via
+    # _ambiguous_longest_dimension_cm: this only needs the longest edge's
+    # magnitude, never which axis it is, so the same "don't guess the axis
+    # order" restriction that (correctly) blocks the labeled arrow chart
+    # does not apply. Unlike is_dimension_slot, unverified data here just
+    # means no extra check runs, not a hard MANUAL_REVIEW_REQUIRED gate,
+    # since the measurement isn't this image's whole point.
     known_length_cm = None
-    if "lifestyle" in image_type_lower and not is_soft_foldable_product(
+    is_lifestyle_slot = "lifestyle" in image_type_lower
+    if is_lifestyle_slot and not is_soft_foldable_product(
             task["rule_category"], task["product_name"], task["description"], task["specifications"]):
         lifestyle_dim_data = classify_dimensions(task["description"], task["specifications"])
         if lifestyle_dim_data["status"] == DIMENSION_STATUS_VERIFIED:
@@ -3233,6 +4237,8 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
                             lifestyle_dim_data.get("height")) if v is not None),
                 default=None)
             known_length_cm = _to_cm(longest, lifestyle_dim_data.get("unit", ""))
+        elif lifestyle_dim_data["status"] == DIMENSION_STATUS_AMBIGUOUS:
+            known_length_cm = _ambiguous_longest_dimension_cm(lifestyle_dim_data.get("raw_text", ""))
 
     prompt = build_generation_prompt(task["product_name"], task["rule_category"], slot_info,
                                      task["description"], task["specifications"],
@@ -3259,29 +4265,124 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
                 layout_plan=layout_plan, geometry_analysis=geometry_analysis,
                 retry_feedback=feedback)
 
-    result = generate_image_with_verification(
-        task["reference_url"], prompt, out_path, project_id, region, tokens, axis_labels,
-        is_vehicle=is_vehicle, text_only_label=text_only_label,
-        product_name=task["product_name"], description=task["description"],
-        specifications=task["specifications"], image_type=slot_info["image_type"],
-        forced_variation=forced_variation, exclude_features=exclude_features,
-        retry_prompt_fn=retry_prompt_fn,
-        attempt_log_fn=_log_attempt if is_dimension_slot else None,
-        known_length_cm=known_length_cm)
+    # Try the new deterministic pipeline first for dimension slots — clean
+    # product image + OpenCV corner detection + PIL-drawn arrows, with no
+    # generative model ever touching the numbers/labels (see
+    # try_deterministic_dimension_image). Falls back to the existing
+    # model-drawn-arrows + verify/retry path, completely unchanged, on ANY
+    # uncertainty (segmentation failure, ambiguous geometry, etc.) — this is
+    # purely additive, never a risk to the proven fallback.
+    used_deterministic_dimensions = False
+    if is_dimension_slot:
+        try:
+            det_ok = try_deterministic_dimension_image(
+                slot_reference_url, task["product_name"], task["rule_category"],
+                task["description"], task["specifications"], layout_plan, dim_data,
+                out_path, project_id, region, tokens)
+        except Exception:
+            det_ok = False
+        if det_ok:
+            used_deterministic_dimensions = True
+            attempt_log.append({"attempt": 1, "valid": True,
+                                "reason": "deterministic_opencv_pipeline_success",
+                                "failure_categories": []})
+
+    if used_deterministic_dimensions:
+        result = {"status": "generated"}
+    else:
+        result = generate_image_with_verification(
+            slot_reference_url, prompt, out_path, project_id, region, tokens, axis_labels,
+            is_vehicle=is_vehicle, text_only_label=text_only_label,
+            product_name=task["product_name"], description=task["description"],
+            specifications=task["specifications"], image_type=slot_info["image_type"],
+            forced_variation=forced_variation, exclude_features=exclude_features,
+            retry_prompt_fn=retry_prompt_fn,
+            attempt_log_fn=_log_attempt if is_dimension_slot else None,
+            known_length_cm=known_length_cm)
     status = result["status"]
     generated = status == "generated" or status.startswith("generated_unverified")
     if is_dimension_slot and generated:
         # Stamp the disclaimer onto whatever file is about to be shipped or
-        # reviewed — including a "generated_unverified" (MANUAL_REVIEW_
-        # REQUIRED) file, since a human reviewer may still open it locally.
-        # Must happen AFTER generate_image_with_verification so it never
-        # runs on an attempt that was later discarded/regenerated, and
-        # before maybe_upload so the uploaded copy already has it.
+        # reviewed — including a "generated_unverified" file, since a human
+        # reviewer may still open it locally. Must happen AFTER
+        # generate_image_with_verification so it never runs on an attempt
+        # that was later discarded/regenerated, and before maybe_upload so
+        # the uploaded copy already has it.
         try:
             add_size_disclaimer(out_path)
         except Exception:
             # Best-effort cosmetic step — never fail the whole slot over it.
             pass
+
+    # A Lifestyle slot that exhausted every retry still stuck on a
+    # SCALE_MISMATCH or PRODUCT_AUTHENTICITY verdict gets the exact same
+    # "don't ship a known defect" treatment as a dimension slot below — the
+    # two things authenticity and real-world scale are non-negotiable for
+    # this pipeline (see FAILURE_PRODUCT_AUTHENTICITY), unlike a cosmetic
+    # framing/composition miss on a Lifestyle shot, which still ships as
+    # "Generated (needs review)" same as before. A wrong-looking or
+    # oversized/undersized product in a lifestyle scene is worse than a
+    # plain, correctly-scaled product photo in its place.
+    lifestyle_fallback_categories = {FAILURE_SCALE_MISMATCH, FAILURE_PRODUCT_AUTHENTICITY}
+    needs_alt_fallback = (
+        (is_dimension_slot and status.startswith("generated_unverified"))
+        or (is_lifestyle_slot and status.startswith("generated_unverified")
+            and lifestyle_fallback_categories.intersection(result.get("failure_categories", [])))
+    )
+
+    bonus_row = None
+    if needs_alt_fallback:
+        # Exhausted MAX_GENERATION_ATTEMPTS (3) without ever passing
+        # verification. Policy: a wrong/guessed dimension chart, or a
+        # lifestyle scene with the wrong product or the wrong real-world
+        # scale, is worse than none. Keep the failed attempt as a separate
+        # BONUS reference image (never counted as one of the 6 required
+        # slots, never presented as verified) and replace the actual
+        # required slot with a plain, easily-verifiable alternate-angle
+        # photo instead, so the required 6 always ship something legitimate.
+        bonus_filename = filename.replace(".png", "_unverified_bonus.png")
+        bonus_path = os.path.join(task["image_out_dir"], bonus_filename)
+        shutil.copy(out_path, bonus_path)
+        bonus_link, bonus_upload_failures = maybe_upload(
+            uploader, upload_cache, bonus_filename, bonus_path, 0)
+        bonus_row = {
+            **row_base,
+            "Slot": f"{slot_num}b",
+            "Image_Type": f"{slot_info['image_type']} (unverified reference only)",
+            "Status": "Generated (needs review)",
+            "Image_Source": bonus_filename, "GCP_Link": bonus_link,
+            "_bucket": "Generated", "_needs_review": True,
+            "_upload_failed": bonus_upload_failures > 0,
+        }
+
+        # Deliberately a DIFFERENT image_type ("Additional Angle", not
+        # "Size / Dimensions" or "Lifestyle Image") passed into the prompt
+        # builder/verifier so none of them re-trigger dimension-specific
+        # arrow-drawing logic or the lifestyle scale/authenticity check
+        # again — this must read as a plain, easy-to-verify product photo,
+        # not a repeat of whatever just failed.
+        alt_slot_info = {**slot_info, "image_type": "Additional Angle"}
+        alt_forced_variation = (
+            "a clean, different full or three-quarter product view — a "
+            "plain product photo, NOT a dimension/measurement diagram"
+            if is_dimension_slot else
+            "a clean, different full or three-quarter view of the complete "
+            "product on a plain background — a plain studio product photo, "
+            "NOT a real-world lifestyle scene"
+        )
+        alt_prompt = build_generation_prompt(
+            task["product_name"], task["rule_category"], alt_slot_info,
+            task["description"], task["specifications"],
+            forced_variation=alt_forced_variation,
+            low_quality_reference=low_quality_reference)
+        result = generate_image_with_verification(
+            slot_reference_url, alt_prompt, out_path, project_id, region, tokens,
+            axis_labels=[], product_name=task["product_name"],
+            description=task["description"], specifications=task["specifications"],
+            image_type="Additional Angle")
+        status = result["status"]
+        generated = status == "generated" or status.startswith("generated_unverified")
+
     gcp_link = ""
     upload_failed = False
     if generated:
@@ -3294,8 +4395,13 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
         # without passing geometry/text QC gets the strict terminal status
         # requested in the brief, not the softer generic "needs review"
         # wording used for other slot types — see also build_wide_summary.py,
-        # which now withholds a live link for either wording.
-        display_status = "MANUAL_REVIEW_REQUIRED" if is_dimension_slot else "Generated (needs review)"
+        # which now withholds a live link for either wording. Only applies
+        # when THIS is still the dimension attempt itself — once the
+        # alt-angle fallback above has run, bonus_row is set and this slot
+        # is a plain photo, not a dimension chart, so it gets the ordinary
+        # generic wording instead of the strict dimension one.
+        display_status = ("MANUAL_REVIEW_REQUIRED" if (is_dimension_slot and bonus_row is None)
+                          else "Generated (needs review)")
     else:
         display_status = status
     if is_dimension_slot:
@@ -3313,7 +4419,7 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
            "Image_Source": filename if generated else "", "GCP_Link": gcp_link,
            "_bucket": "Generated" if generated else "Failed",
            "_needs_review": status.startswith("generated_unverified"),
-           "_upload_failed": upload_failed}
+           "_upload_failed": upload_failed, "_bonus_row": bonus_row}
 
 
 def main():
@@ -3406,6 +4512,16 @@ def main():
                         **live_counts)
 
     final_rows = run_concurrent(tasks, worker, max_workers=args.workers, on_result=on_result)
+    # A dimension slot that exhausted all retries embeds a "_bonus_row" —
+    # the failed dimension attempt, kept as a non-counted extra reference
+    # line right after its real slot, never one of the 6 required rows (see
+    # process_slot_task's alt-angle fallback).
+    expanded_rows = []
+    for row in final_rows:
+        expanded_rows.append(row)
+        if row.get("_bonus_row"):
+            expanded_rows.append(row["_bonus_row"])
+    final_rows = expanded_rows
     checkpoint.close()
     write_status(status_path, total=total, done=total, started_at=started_at,
                 finished_at=time.strftime("%Y-%m-%dT%H:%M:%S"), **live_counts)

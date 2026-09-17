@@ -122,7 +122,8 @@ def main():
     write_status(status_path, stage="summary", stage_num=4)
     ok = run_step(
         [python, str(SCRIPTS_DIR / "build_wide_summary.py"),
-         "--input", str(final_xlsx), "--out", str(summary_xlsx)],
+         "--input", str(final_xlsx), "--products", str(products_csv),
+         "--out", str(summary_xlsx)],
         log_path, "summary",
     )
     if not ok:

@@ -13,6 +13,7 @@ Usage:
 import argparse
 
 import openpyxl
+import pandas as pd
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -55,19 +56,48 @@ def load_long_format(path: str) -> tuple:
                 link, label = gcp_link, gcp_link
             else:
                 link, label = None, f"{image_source} (LOCAL FILE — not uploaded to GCS)"
-        elif status in ("Generated (needs review)", "MANUAL_REVIEW_REQUIRED"):
-            # HARD GATE — an image that exhausted every verify-and-retry
-            # attempt without a clean pass ("Generated (needs review)"), or
-            # was routed to manual review before generation was even
-            # attempted at all (ambiguous/missing dimension data — see
-            # classify_dimensions in pipeline_lib.py), must never appear as
-            # a normal, clickable image link in the actual deliverable.
-            # Previously this branch still wrote a live gcp_link here,
-            # distinguished only by a "(NEEDS REVIEW)" text suffix — nothing
-            # stopped someone clicking it and treating it as a passing
-            # image. No link, ever, for either status — same as a genuine
-            # generation failure below.
-            link, label = None, f"[{status}]"
+        elif status == "Generated (needs review)":
+            # This IS a generated (uploaded) image that exhausted every
+            # verify-and-retry attempt without a clean pass — a reviewer
+            # needs to actually look at it to judge whether it's usable or
+            # needs a manual redo, so a bare status word with nothing to
+            # click isn't reviewable. Show the link, but labeled unmistakably
+            # as unverified — never bare/plain like a normal passing link —
+            # so nobody skims the sheet and treats it as a clean pass.
+            if gcp_link:
+                link, label = gcp_link, f"[NEEDS REVIEW — unverified, exhausted retries] {gcp_link}"
+            else:
+                link, label = None, f"{image_source} (LOCAL FILE, unverified — not uploaded to GCS)"
+            note_flag = f"Slot {slot} ({image_type}) needs manual review"
+            products[pid]["note"] = (products[pid]["note"] + "; " + note_flag
+                                     if products[pid]["note"] else note_flag)
+        elif status == "MANUAL_REVIEW_REQUIRED":
+            # Not a generated deliverable at all — generation was never
+            # attempted (bad/mismatched reference photo, or admin dimension
+            # data that can't be trusted). image_source here is the
+            # product's own REFERENCE photo (see process_slot_task), so a
+            # reviewer has something real to look at — unlike the generated-
+            # but-failed case above, there's no risk of mistaking a plain
+            # reference photo for a finished catalog image, so the link is
+            # kept, just clearly labeled as a reference, not a final image.
+            #
+            # ALL 6 slots share the exact same single reference photo when
+            # generation never even started (nothing per-slot has diverged
+            # yet), so the same URL would otherwise repeat identically 6
+            # times — that reads as a bug ("why is it the same image every
+            # time?") rather than the real reason (one bad photo blocks the
+            # whole product). Show the full link only the first time per
+            # product; later slots stay clickable (same link) but with a
+            # short label pointing back to it instead of repeating it.
+            seen_refs = products[pid].setdefault("_seen_ref_photos", set())
+            if image_source:
+                if image_source in seen_refs:
+                    link, label = image_source, "[NEEDS REVIEW — same flagged reference photo, see Image 1]"
+                else:
+                    seen_refs.add(image_source)
+                    link, label = image_source, f"[NEEDS REVIEW — reference photo, not final] {image_source}"
+            else:
+                link, label = None, f"[{status}]"
             note_flag = f"Slot {slot} ({image_type}) needs manual review"
             products[pid]["note"] = (products[pid]["note"] + "; " + note_flag
                                      if products[pid]["note"] else note_flag)
@@ -79,15 +109,36 @@ def load_long_format(path: str) -> tuple:
     return products, order
 
 
-def write_wide_excel(products: dict, order: list, out_path: str):
+def load_categories(products_csv: str) -> dict:
+    """Product_ID -> (Category_L1, Category_L2, Category_L3) from
+    products_detail.csv (step 1's output) — the real LO/L1/L2 category
+    breakdown, not the single merged rule-category final_output.xlsx
+    carries. Returns {} if the file can't be read (caller then just omits
+    these columns rather than failing the whole sheet over it)."""
+    try:
+        df = pd.read_csv(products_csv, dtype={"Product_ID": str})
+    except (OSError, pd.errors.ParserError):
+        return {}
+    out = {}
+    for _, row in df.iterrows():
+        out[row["Product_ID"]] = (
+            row.get("Category_L1", "") or "",
+            row.get("Category_L2", "") or "",
+            row.get("Category_L3", "") or "",
+        )
+    return out
+
+
+def write_wide_excel(products: dict, order: list, out_path: str, categories: dict = None):
+    categories = categories or {}
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Products"
     ws.sheet_view.showGridLines = False
 
-    headers = ["Product_ID", "SKU", "Name", "Image 1", "Image 2", "Image 3",
-               "Image 4", "Image 5", "Image 6", "Notes"]
-    widths = [11, 16, 40, 32, 32, 32, 32, 32, 32, 40]
+    headers = ["Product_ID", "SKU", "Name", "LO CATEGORY", "L1 CATEGORY", "L2 CATEGORY",
+               "Image 1", "Image 2", "Image 3", "Image 4", "Image 5", "Image 6", "Notes"]
+    widths = [11, 16, 40, 14, 22, 22, 32, 32, 32, 32, 32, 32, 40]
     for i, h in enumerate(headers, start=1):
         c = ws.cell(row=1, column=i, value=h)
         c.font = HEADER_FONT
@@ -99,19 +150,20 @@ def write_wide_excel(products: dict, order: list, out_path: str):
 
     for r_idx, pid in enumerate(order, start=2):
         p = products[pid]
-        ws.cell(row=r_idx, column=1, value=pid).font = BODY_FONT
-        ws.cell(row=r_idx, column=2, value=p["sku"]).font = BODY_FONT
-        ws.cell(row=r_idx, column=3, value=p["name"]).font = BODY_FONT
-        for col in (1, 2, 3):
-            ws.cell(row=r_idx, column=col).alignment = WRAP
-            ws.cell(row=r_idx, column=col).border = BORDER
+        lo, l1, l2 = categories.get(str(pid), ("", "", ""))
+        plain_values = [pid, p["sku"], p["name"], lo, l1, l2]
+        for col, val in enumerate(plain_values, start=1):
+            cell = ws.cell(row=r_idx, column=col, value=val)
+            cell.font = BODY_FONT
+            cell.alignment = WRAP
+            cell.border = BORDER
 
         for slot_num in range(1, 7):
             label, link = p["slots"].get(slot_num, ("", None))
-            write_link_cell(ws, r_idx, 3 + slot_num, label, url=link,
+            write_link_cell(ws, r_idx, 6 + slot_num, label, url=link,
                             font=BODY_FONT, border=BORDER)
 
-        note_cell = ws.cell(row=r_idx, column=10, value=p["note"])
+        note_cell = ws.cell(row=r_idx, column=13, value=p["note"])
         note_cell.font = BODY_FONT
         note_cell.alignment = WRAP
         note_cell.border = BORDER
@@ -123,11 +175,15 @@ def write_wide_excel(products: dict, order: list, out_path: str):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--input", required=True, help="final_output.xlsx from step 3")
+    ap.add_argument("--products",
+                    help="products_detail.csv from step 1 — if given, adds real "
+                         "LO/L1/L2 category columns (omitted otherwise)")
     ap.add_argument("--out", default="products_6_images.xlsx")
     args = ap.parse_args()
 
     products, order = load_long_format(args.input)
-    write_wide_excel(products, order, args.out)
+    categories = load_categories(args.products) if args.products else {}
+    write_wide_excel(products, order, args.out, categories)
     print(f"Done -> {args.out} ({len(order)} products)")
 
 

@@ -95,9 +95,58 @@ RESPONSE_SCHEMA = {
         },
         "slot": {"type": "INTEGER"},
         "confidence": {"type": "STRING", "enum": ["high", "medium", "low"]},
+        # The fields below answer a DIFFERENT question from product_matches/
+        # slot: "is this specific photo good raw MATERIAL to feed into image
+        # generation as a reference?" — correct product identity does not
+        # imply that. A photo can genuinely be product_matches=true, slot=2
+        # (fits fine as this category's own "Angle" deliverable) and still
+        # be a poor GENERATION reference for a DIFFERENT slot — e.g. too
+        # zoomed in, the product half out of frame, or packaging covering
+        # most of the product. Without this, every covered photo was
+        # treated as equally trustworthy raw material regardless of how
+        # little of the product it actually shows.
+        "product_visibility": {
+            "type": "NUMBER",
+            "description": ("0.0-1.0: how much of the product's overall shape/surface is "
+                           "actually visible and unobstructed in this photo (not overlaid "
+                           "by packaging, other objects, a hand, or cropped out of frame). "
+                           "1.0 = the whole product is clearly visible."),
+        },
+        "image_quality": {
+            "type": "NUMBER",
+            "description": ("0.0-1.0: sharpness/lighting/resolution quality of this photo "
+                           "as a piece of source material, independent of composition — "
+                           "1.0 = sharp, well-lit, high-resolution."),
+        },
+        "full_product_visible": {
+            "type": "BOOLEAN",
+            "description": "True only if the ENTIRE product (not just part of it) is within the frame, uncropped.",
+        },
+        "packaging_present": {
+            "type": "BOOLEAN",
+            "description": "True if the product is shown inside/behind its retail packaging (box, blister pack) rather than bare.",
+        },
+        "view_angle": {
+            "type": "STRING",
+            "enum": ["front", "front_3q", "side", "back", "top", "angle_other"],
+            "description": "Which camera angle this photo was taken from.",
+        },
+        "usable_as_reference": {
+            "type": "BOOLEAN",
+            "description": ("True only if this specific photo is good enough to hand to "
+                           "an image-generation model as reference material for OTHER "
+                           "slots (not just to satisfy its own slot) — i.e. "
+                           "product_visibility and image_quality are both reasonably high "
+                           "and full_product_visible is true. A photo can still be "
+                           "usable_as_reference=false even when product_matches=true and "
+                           "slot > 0 (it's fine as ITS OWN deliverable but poor raw "
+                           "material for generating a different slot from)."),
+        },
         "reason": {"type": "STRING"},
     },
-    "required": ["product_matches", "issues_found", "slot", "confidence", "reason"],
+    "required": ["product_matches", "issues_found", "slot", "confidence",
+                "product_visibility", "image_quality", "full_product_visible",
+                "packaging_present", "view_angle", "usable_as_reference", "reason"],
 }
 
 CONFIDENCE_RANK = {"high": 3, "medium": 2, "low": 1}
@@ -161,6 +210,17 @@ otherwise clearly does not fulfil any of these slots adequately (too blurry,
 wrong background for that slot type, product not clearly visible), respond
 with slot number 0 regardless of how well the photo's content or composition
 happens to otherwise match a slot's generic description.
+
+Separately from the slot decision, also assess this photo as potential
+GENERATION REFERENCE MATERIAL for a DIFFERENT slot than the one it covers —
+this is a different question from "does it fulfil ITS OWN slot": a photo can
+correctly be accepted for its own slot while still being poor raw material to
+build another image FROM (too zoomed in, product partly out of frame,
+packaging covering most of the product, low quality). Fill in
+product_visibility, image_quality, full_product_visible, packaging_present,
+view_angle, and usable_as_reference honestly and independently of the slot
+decision above — do not default usable_as_reference to true just because the
+image was accepted for a slot.
 
 Give a one short phrase reason."""
 
@@ -305,9 +365,24 @@ def classify_product(rules: RuleMaster, row, model: str, project_id: str,
             existing = covered.get(slot_num)
             if not existing or (CONFIDENCE_RANK.get(result.get("confidence"), 0)
                                 > CONFIDENCE_RANK.get(existing["confidence"], 0)):
-                covered[slot_num] = {"image_url": url,
-                                     "confidence": result.get("confidence", "low"),
-                                     "reason": result.get("reason", "")}
+                covered[slot_num] = {
+                    "image_url": url,
+                    "confidence": result.get("confidence", "low"),
+                    "reason": result.get("reason", ""),
+                    # Reference-suitability signals — a SEPARATE question
+                    # from "does this fulfil its own slot" (see
+                    # RESPONSE_SCHEMA/build_classification_prompt). Consumed
+                    # by generate_missing_images_gcp.py's build_reference_set
+                    # to decide whether this photo should also be offered as
+                    # generation material for OTHER slots, not just kept as
+                    # its own slot's deliverable.
+                    "usable_as_reference": result.get("usable_as_reference", False),
+                    "image_quality": result.get("image_quality", 0.0),
+                    "product_visibility": result.get("product_visibility", 0.0),
+                    "full_product_visible": result.get("full_product_visible", False),
+                    "packaging_present": result.get("packaging_present", False),
+                    "view_angle": result.get("view_angle", ""),
+                }
         else:
             unmatched.append({"image_url": url, "reason": result.get("reason", "")})
         time.sleep(REQUEST_DELAY_SECONDS)
@@ -334,14 +409,15 @@ def process_classify_task(row, rules: RuleMaster, model: str, project_id: str,
 
     if row.get("Fetch_Status") != "ok" or not split_image_urls(row.get("Image_URLs", "")):
         return {**base, "Rule_Category": "", "Status": "skipped_no_images_or_fetch_failed",
-               "Missing_Slots": "", "Covered_Slots": "", "Unmatched_Images": ""}
+               "Missing_Slots": "", "Covered_Slots": "", "Unmatched_Images": "",
+               "Reference_Quality": ""}
 
     result = classify_product(rules, row, model, project_id, region, tokens)
 
     if result["status"] == "no_rule_for_category":
         return {**base, "Rule_Category": "", "Status": "no_rule_for_category",
                "Missing_Slots": "", "Covered_Slots": "", "Unmatched_Images": "",
-               "_unknown_category": row.get("Category_L1", "") or "(blank)"}
+               "Reference_Quality": "", "_unknown_category": row.get("Category_L1", "") or "(blank)"}
 
     return {
         **base,
@@ -352,6 +428,16 @@ def process_classify_task(row, rules: RuleMaster, model: str, project_id: str,
         "Covered_Slots": format_slot_map(
             {slot: info["image_url"] for slot, info in result["covered_slots"].items()}),
         "Unmatched_Images": "; ".join(u["image_url"] for u in result["unmatched_images"]),
+        # JSON blob keyed by slot number — the reference-suitability signals
+        # (see classify_product) for whichever image ended up covering that
+        # slot. A plain "slot:url" string (Covered_Slots) has no room for
+        # this; consumed by generate_missing_images_gcp.py's
+        # build_reference_set to decide whether a covered photo should also
+        # be offered as generation material for OTHER slots.
+        "Reference_Quality": json.dumps({
+            str(slot): {k: v for k, v in info.items() if k != "image_url"}
+            for slot, info in result["covered_slots"].items()
+        }),
     }
 
 
