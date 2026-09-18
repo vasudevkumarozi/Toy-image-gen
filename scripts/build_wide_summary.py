@@ -38,7 +38,7 @@ def load_long_format(path: str) -> tuple:
     for (pid, sku, name, category, slot, image_type, status, image_source, gcp_link) in rows:
         if pid not in products:
             products[pid] = {"sku": sku, "name": name, "category": category,
-                             "slots": {}, "note": ""}
+                             "slots": {}, "secondary": None, "note": ""}
             order.append(pid)
 
         if status == "no_rule_for_category":
@@ -50,12 +50,23 @@ def load_long_format(path: str) -> tuple:
             # image_source is still the original admin-panel URL in both
             # cases — quality_check_failed just means we couldn't verify
             # its resolution, not that it was replaced with anything.
-            link, label = image_source, image_source
-        elif status in ("Generated", "Existing (enhanced)"):
+            link, label = image_source, f"[ADMIN PHOTO] {image_source}"
+        elif status == "Existing (enhanced)":
+            # A real admin photo that was below the 2048px floor and got
+            # upscaled — still the admin's real product photo, not an AI
+            # image, so it gets its own tag distinct from "Generated"
+            # rather than looking identical to one (see feedback that
+            # admin-vs-AI-generated needs to be visually obvious in this
+            # sheet, not just inferable from the Notes column).
             if gcp_link:
-                link, label = gcp_link, gcp_link
+                link, label = gcp_link, f"[ADMIN PHOTO — ENHANCED TO 2K] {gcp_link}"
             else:
-                link, label = None, f"{image_source} (LOCAL FILE — not uploaded to GCS)"
+                link, label = None, f"[ADMIN PHOTO — ENHANCED TO 2K] {image_source} (LOCAL FILE — not uploaded to GCS)"
+        elif status == "Generated":
+            if gcp_link:
+                link, label = gcp_link, f"[AI GENERATED] {gcp_link}"
+            else:
+                link, label = None, f"[AI GENERATED] {image_source} (LOCAL FILE — not uploaded to GCS)"
         elif status == "Generated (needs review)":
             # This IS a generated (uploaded) image that exhausted every
             # verify-and-retry attempt without a clean pass — a reviewer
@@ -101,10 +112,27 @@ def load_long_format(path: str) -> tuple:
             note_flag = f"Slot {slot} ({image_type}) needs manual review"
             products[pid]["note"] = (products[pid]["note"] + "; " + note_flag
                                      if products[pid]["note"] else note_flag)
+        elif status.startswith("Skipped"):
+            # By-design, not a defect: no admin Size/Dimensions photo was
+            # available and generation for this slot is disabled by policy
+            # (see process_slot_task) — this product simply ships 5 images
+            # instead of 6. Leave the cell blank rather than a bracketed
+            # status word or a "needs review" note, since there is nothing
+            # for a reviewer to act on here.
+            link, label = None, ""
         else:
             link, label = None, f"[{status}]"
 
-        products[pid]["slots"][slot] = (label, link)
+        # A bonus/secondary row (Slot "6b", "3b", ...) — the best-effort
+        # Size/Dimensions chart generated ALONGSIDE the required alt-angle
+        # primary slot, never one of the numbered 1-6 slots itself (see
+        # process_slot_task's secondary_row). Goes in its own column so it
+        # isn't silently dropped (a plain `slots[slot]` write would never
+        # be read back — write_wide_excel only iterates integer slots 1-6).
+        if isinstance(slot, str) and slot.endswith("b"):
+            products[pid]["secondary"] = (label, link)
+        else:
+            products[pid]["slots"][slot] = (label, link)
 
     return products, order
 
@@ -137,8 +165,9 @@ def write_wide_excel(products: dict, order: list, out_path: str, categories: dic
     ws.sheet_view.showGridLines = False
 
     headers = ["Product_ID", "SKU", "Name", "LO CATEGORY", "L1 CATEGORY", "L2 CATEGORY",
-               "Image 1", "Image 2", "Image 3", "Image 4", "Image 5", "Image 6", "Notes"]
-    widths = [11, 16, 40, 14, 22, 22, 32, 32, 32, 32, 32, 32, 40]
+               "Image 1", "Image 2", "Image 3", "Image 4", "Image 5", "Image 6",
+               "Secondary (Size/Dimensions — best effort, not guaranteed)", "Notes"]
+    widths = [11, 16, 40, 14, 22, 22, 32, 32, 32, 32, 32, 32, 32, 40]
     for i, h in enumerate(headers, start=1):
         c = ws.cell(row=1, column=i, value=h)
         c.font = HEADER_FONT
@@ -163,7 +192,11 @@ def write_wide_excel(products: dict, order: list, out_path: str, categories: dic
             write_link_cell(ws, r_idx, 6 + slot_num, label, url=link,
                             font=BODY_FONT, border=BORDER)
 
-        note_cell = ws.cell(row=r_idx, column=13, value=p["note"])
+        sec_label, sec_link = p.get("secondary") or ("", None)
+        write_link_cell(ws, r_idx, 13, sec_label, url=sec_link,
+                        font=BODY_FONT, border=BORDER)
+
+        note_cell = ws.cell(row=r_idx, column=14, value=p["note"])
         note_cell.font = BODY_FONT
         note_cell.alignment = WRAP
         note_cell.border = BORDER

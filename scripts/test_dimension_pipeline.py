@@ -525,6 +525,159 @@ def test_23_product_authenticity_failure_category():
          feedback != scale_feedback)
 
 
+def test_24_feature_label_spelling_failure_category():
+    """A Feature slot's rendered text label coming back misspelled/garbled
+    is a distinct, checkable defect (FAILURE_FEATURE_LABEL_SPELLING) from
+    an unsupported/duplicate feature — each needs its own targeted retry
+    instruction, not a generic 'try again'."""
+    feedback = g.build_retry_feedback_text([g.FAILURE_FEATURE_LABEL_SPELLING], "test reason", None)
+    check("T24 spelling feedback tells the model to re-render the label correctly",
+         "spelled correctly" in feedback)
+    other_feedback = g.build_retry_feedback_text([g.FAILURE_PRODUCT_AUTHENTICITY], "test reason", None)
+    check("T24 spelling feedback differs from authenticity feedback", feedback != other_feedback)
+
+
+def test_25_feature_pointer_wrong_failure_category():
+    """A pointer/leader line landing on the WRONG part (or no part at all)
+    is a distinct, checkable defect (FAILURE_FEATURE_POINTER_WRONG) from a
+    misspelled label or an unsupported feature — needs its own targeted
+    retry instruction (real failure history: a wheel-mechanism label
+    pointed at a mixer drum, then a window, then a bumper, then a
+    headlight, across different real products, before the shot was
+    reframed as a close-up)."""
+    feedback = g.build_retry_feedback_text([g.FAILURE_FEATURE_POINTER_WRONG], "test reason", None)
+    check("T25 pointer feedback tells the model to land the pointer on the right part",
+         "SAME physical part" in feedback)
+    other_feedback = g.build_retry_feedback_text([g.FAILURE_FEATURE_LABEL_SPELLING], "test reason", None)
+    check("T25 pointer feedback differs from spelling feedback", feedback != other_feedback)
+
+
+def test_26_no_real_packaging_reference_detected():
+    """A product with NO real photo of its retail packaging anywhere
+    (no covered slot is packaging-type) must resolve ref_set["packaging"]
+    to None — process_slot_task's box-slot gate relies on this exact
+    signal to refuse inventing a box design from nothing (real defect:
+    product 35806 invented an entire back-panel design with no basis in
+    reality)."""
+    slots = {
+        1: {"image_type": "Assembled Product"},
+        2: {"image_type": "Angle"},
+        3: {"image_type": "Feature 1"},
+    }
+    covered = {1: "front.jpg", 2: "angle.jpg"}
+    ref_set = g.build_reference_set(covered, slots, ["front.jpg", "angle.jpg"])
+    check("T26 no packaging role when nothing covers a packaging-type slot",
+         ref_set["packaging"] is None, ref_set)
+
+
+def test_27_packaging_in_angle_shot_failure_category():
+    """An angle/view-type slot showing the box instead of the bare product
+    (real defects: a Hot Wheels 'Second Angle' shot came back as the same
+    box from a different angle; a doll's 'Angle 1' shot showed box+doll
+    instead of the bare doll) needs its own targeted retry instruction."""
+    feedback = g.build_retry_feedback_text([g.FAILURE_PACKAGING_IN_ANGLE_SHOT], "test reason", None)
+    check("T27 packaging-in-angle feedback tells the model to remove packaging",
+         "removed from any box" in feedback)
+    other_feedback = g.build_retry_feedback_text([g.FAILURE_FEATURE_POINTER_WRONG], "test reason", None)
+    check("T27 packaging-in-angle feedback differs from pointer feedback", feedback != other_feedback)
+
+
+def test_28_dimension_label_offset_scales_and_avoids_overlap():
+    """The label offset in draw_dimension_arrows_deterministic must scale
+    with image size (a fixed small pixel offset is invisible on a 2048px
+    canvas — real defect: product 2145's labels sat almost on top of the
+    product itself on a 24x4x18cm box) and must be pushed toward whichever
+    side of the arrow's midpoint is farther from the image center, not a
+    fixed direction, so it lands in background space regardless of which
+    side of the product the arrow is drawn on."""
+    from PIL import Image
+    img = Image.new("RGB", (2048, 2048))
+    axes = {"length": {"near": (200, 1800), "far": (1800, 1800)}}
+    dim_data = {"length": 24, "unit": "cm"}
+    tmp_path = os.path.join(os.path.dirname(__file__), "_test28_tmp.png")
+    img.save(tmp_path)
+    g.draw_dimension_arrows_deterministic(tmp_path, axes, dim_data)
+    rendered = Image.open(tmp_path)
+    # A white label pixel should now exist well below the arrow line
+    # (y=1800) given the arrow sits in the lower half of a 2048px canvas —
+    # perp direction away from center (1024,1024) points DOWN from y=1800.
+    found_far_label = any(
+        rendered.getpixel((x, y)) == (255, 255, 255)
+        for y in range(1850, 2040, 10) for x in range(200, 1800, 20)
+    )
+    check("T28 label lands well below the arrow line (pushed away from image center), not on top of it",
+         found_far_label)
+    os.remove(tmp_path)
+
+
+def test_29_packed_and_unpacked_combo_slot_not_suppressed_by_angle_rule():
+    """'Full Unpacked and Packed Front-Angle View' (Dolls, Action Figures)
+    contains 'angle' in its own name — the blanket PACKAGING_LOGIC_RULE
+    ('no packaging at all') must NOT apply to it, or it directly
+    contradicts this slot's own requirement to show the box. Real defect:
+    a doll's slot 1 came back as just the bare doll, no box at all."""
+    prompt = g.build_generation_prompt(
+        "Test Doll", "Dolls & Doll House",
+        {"image_type": "Full Unpacked and Packed Front-Angle View",
+         "description": "Show the complete unpacked product and its matching "
+                        "retail package together at a clear front angle."},
+        "", "")
+    check("T29 combo slot is NOT told to show no packaging at all",
+         "no packaging of any kind anywhere in the frame" not in prompt, prompt)
+    check("T29 combo slot IS told to show both box and unpacked product together",
+         "TWO things together" in prompt)
+    # This is the check that would have caught the actual live failure:
+    # the GENERIC FRAMING_RULE's "show exactly one view; do not add a
+    # second... duplicate view" sentence (ONE_VIEW_RULE) applies to every
+    # slot by default and directly cancels out the combo instruction above
+    # — two fixes were shipped that individually looked right but the
+    # model kept dropping the box anyway until this conflict was found.
+    check("T29 combo slot does NOT also get the generic 'exactly one view' rule",
+         "Show exactly one view" not in prompt, prompt)
+    normal_prompt = g.build_generation_prompt(
+        "Test Car", "Cars & RC Toys",
+        {"image_type": "Second Angle", "description": "Show a different angle."},
+        "", "")
+    check("T29 a normal (non-combo) slot still gets the 'exactly one view' rule",
+         "Show exactly one view" in normal_prompt)
+
+
+def test_30_missing_packed_or_unpacked_failure_category():
+    """Distinct, targeted retry instruction from the opposite defect
+    (packaging showing up where it shouldn't)."""
+    feedback = g.build_retry_feedback_text([g.FAILURE_MISSING_PACKED_OR_UNPACKED], "test reason", None)
+    check("T30 feedback tells the model to show both box and unpacked product",
+         "genuine, intact, non-empty box" in feedback)
+    other_feedback = g.build_retry_feedback_text([g.FAILURE_PACKAGING_IN_ANGLE_SHOT], "test reason", None)
+    check("T30 feedback differs from packaging-in-angle feedback", feedback != other_feedback)
+
+
+def test_31_compose_packed_and_unpacked_image_produces_square_canvas_with_both_panels():
+    """The deterministic composite (built after three live prompt-only
+    attempts all failed to make an image-EDIT call keep the box AND add an
+    unpacked instance) must guarantee both panels end up in one square
+    output — no dependence on any generative model's compositional
+    ability. Distinct pixel colors on the left vs right half confirm two
+    different source images actually got pasted in, not one stretched
+    copy of either."""
+    from io import BytesIO
+    from PIL import Image
+    boxed = Image.new("RGB", (600, 1200), (200, 50, 50))     # red "boxed" photo
+    unpacked = Image.new("RGB", (600, 1200), (50, 50, 200))  # blue "unpacked" photo
+    boxed_buf, unpacked_buf = BytesIO(), BytesIO()
+    boxed.save(boxed_buf, format="PNG")
+    unpacked.save(unpacked_buf, format="PNG")
+    tmp_path = os.path.join(os.path.dirname(__file__), "_test31_tmp.png")
+    g.compose_packed_and_unpacked_image(boxed_buf.getvalue(), unpacked_buf.getvalue(), tmp_path)
+    result = Image.open(tmp_path)
+    check("T31 output canvas is square", result.width == result.height, result.size)
+    left_px = result.getpixel((result.width // 6, result.height // 2))
+    right_px = result.getpixel((result.width - result.width // 6, result.height // 2))
+    check("T31 left half shows the boxed photo's color", left_px[0] > left_px[2], left_px)
+    check("T31 right half shows the unpacked photo's color", right_px[2] > right_px[0], right_px)
+    os.remove(tmp_path)
+
+
 def run_pure_tests():
     print("=== PURE tests (no network) ===")
     test_1_box_20_15_2()
@@ -551,6 +704,14 @@ def run_pure_tests():
     test_21_ambiguous_longest_dimension_cm()
     test_22_scale_ratio_mismatch_threshold()
     test_23_product_authenticity_failure_category()
+    test_24_feature_label_spelling_failure_category()
+    test_25_feature_pointer_wrong_failure_category()
+    test_26_no_real_packaging_reference_detected()
+    test_27_packaging_in_angle_shot_failure_category()
+    test_28_dimension_label_offset_scales_and_avoids_overlap()
+    test_29_packed_and_unpacked_combo_slot_not_suppressed_by_angle_rule()
+    test_30_missing_packed_or_unpacked_failure_category()
+    test_31_compose_packed_and_unpacked_image_produces_square_canvas_with_both_panels()
     test_retry_feedback_is_failure_specific()
 
 
