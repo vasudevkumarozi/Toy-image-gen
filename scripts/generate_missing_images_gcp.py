@@ -84,7 +84,7 @@ import pandas as pd
 import requests
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageChops, ImageDraw, ImageFont
 from io import BytesIO
 
 from pipeline_lib import (
@@ -532,6 +532,29 @@ FEATURE_ROTATION = [
     "a specific compartment, storage space, or opening/closing mechanism",
 ]
 SLOT_FAMILY_ROTATIONS = {"angle": ANGLE_ROTATION, "feature": FEATURE_ROTATION}
+
+# process_slot_task's "no_feature_available" fallback (see there) used to
+# assign every sibling Feature slot that hits it the SAME static phrase
+# ("a different full or three-quarter view of the complete product,
+# clearly distinct from this product's other images") with no per-slot
+# variation at all — unlike every other rotation in this file, which is
+# indexed by slot position specifically so sibling calls (each a separate,
+# blind API call — see build_generation_prompt's variation_note) can't
+# converge on the same output. A product whose text only supports 1 of its
+# 3 Feature slots' worth of distinct features had feature_2 and feature_3
+# BOTH receive that identical phrase and came back as near-duplicate
+# generic three-quarter shots — a real, confirmed instance of "the same
+# image gets made twice." Indexed by the slot's overall feature-family
+# position (same `idx` used to pick a real extracted feature above) so two
+# slots landing in this fallback together still get genuinely different,
+# non-invented camera views instead of an identical prompt.
+NO_FEATURE_VIEW_ROTATION = [
+    "a different three-quarter view of the complete product",
+    "a top-down view looking straight down at the complete product",
+    "a straight-on side profile view of the complete product",
+    "a straight-on front view of the complete product, framed at a "
+    "noticeably different distance than this product's other images",
+]
 
 
 def assign_slot_variations(slots: dict, missing_slot_nums: set) -> tuple:
@@ -1161,12 +1184,23 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
         # size check against the people in it.
         lifestyle_dims = extract_dimensions_from_description(description, specifications)
         if lifestyle_dims:
+            comparison_hint = ""
+            longest_cm = _ambiguous_longest_dimension_cm(lifestyle_dims)
+            if longest_cm is not None:
+                comparison_hint = (
+                    f" For scale, that is roughly the size of "
+                    f"{_familiar_size_comparison(longest_cm)} — use that as a "
+                    f"concrete reference for how large to render it, not just the "
+                    f"raw number, since exact centimeter judgment from a photo is "
+                    f"easy to get wrong for small objects."
+                )
             extra_rules += (
                 f" Scale check: the manufacturer lists this product's actual size "
-                f"as {lifestyle_dims}. Render it at a size, relative to the "
-                f"people in this scene, that is genuinely consistent with those "
-                f"real dimensions — not larger or smaller than a product that "
-                f"size would actually look in someone's hands or on the floor."
+                f"as {lifestyle_dims}.{comparison_hint} Render it at a size, "
+                f"relative to the people in this scene, that is genuinely "
+                f"consistent with those real dimensions — not larger or smaller "
+                f"than a product that size would actually look in someone's hands "
+                f"or on the floor."
             )
         else:
             extra_rules += (
@@ -1185,9 +1219,10 @@ def build_generation_prompt(product_name: str, category: str, slot_info: dict,
         # view instead: no caption requirement, no close-up-crop requirement.
         extra_rules += (
             " This product does not have another distinct feature to call "
-            "out here — do NOT invent one. Instead, show a clean, different "
-            "full or three-quarter view of the complete product (no text "
-            "label, no pointer/leader line, no close-up callout framing)."
+            "out here — do NOT invent one. Instead, follow the SPECIFIC "
+            "REQUIREMENT below for exactly which alternate view of the "
+            "complete product to show (no text label, no pointer/leader "
+            "line, no close-up callout framing)."
         )
     elif "feature" in image_type_lower:
         flat_print_keywords = (
@@ -1689,7 +1724,34 @@ def assess_reference_image(reference_url: str, product_name: str, description: s
     Fails open ({"defect_type": "none", ...}) on any error — this is an
     extra safety net on top of the pipeline, not something that should
     block a product's generation because of one flaky call.
-    """
+
+    Blocking a product entirely (wrong_product_or_unusable) is expensive —
+    it stops all 6 slots, not just one — so a single noisy vision call is
+    too cheap a way to trigger it. Confirmed real case: the SAME Hot Wheels
+    product, SAME reference photo, passed cleanly on a local run and was
+    entirely blocked on a GCP instance run minutes later — pure call-to-call
+    sampling variance on a borderline photo, not a real defect. This calls
+    the single-shot check twice and only reports the block if BOTH calls
+    agree; any disagreement is treated as a pass (the cheaper, more common
+    outcome), so a flaky single call can no longer take down a whole
+    product. The extra call only happens on the rare flagged path, not for
+    the vast majority of clean references."""
+    first = _assess_reference_image_once(
+        reference_url, product_name, description, specifications, project_id, region, tokens)
+    if first.get("defect_type") != "wrong_product_or_unusable":
+        return first
+    second = _assess_reference_image_once(
+        reference_url, product_name, description, specifications, project_id, region, tokens)
+    if second.get("defect_type") == "wrong_product_or_unusable":
+        return first
+    return {"shows_correct_product": True, "defect_type": "none",
+           "reason": (f"inconsistent verdicts across two checks (not blocking): "
+                     f"first={first.get('reason', '')!r}, second={second.get('reason', '')!r}")}
+
+
+def _assess_reference_image_once(reference_url: str, product_name: str, description: str,
+                                 specifications: str, project_id: str, region: str,
+                                 tokens: VertexTokenProvider) -> dict:
     try:
         content, media_type = get_image_bytes(reference_url)
     except (requests.RequestException, OSError) as e:
@@ -2156,6 +2218,28 @@ def image_shows_packaged_product(image_url: str, project_id: str, region: str,
         return False
 
 
+def _trim_whitespace(img: Image.Image, tolerance: int = 12) -> Image.Image:
+    """Crops away the uniform near-white margin around the real subject.
+
+    Both the admin's boxed product photo and a freshly generated "unpacked"
+    photo typically already center their subject on a mostly-white
+    background with generous padding baked in (normal for isolated product
+    renders). compose_packed_and_unpacked_image's own `gap` is meant to be
+    the ONLY space between the two subjects, but without this trim step that
+    baked-in padding on each photo stacks on top of `gap` — a tall, narrow
+    subject like a doll ends up looking far off to the side of its own
+    panel, so two of them pasted side by side read as much farther apart
+    than intended (confirmed on product 2158, a Barbie doll: boxed and
+    unpacked instances landed with a canyon of white between them). Fails
+    open (returns the image unchanged) if nothing looks croppable."""
+    rgb = img.convert("RGB")
+    bg = Image.new("RGB", rgb.size, (255, 255, 255))
+    diff = ImageChops.difference(rgb, bg)
+    mask = diff.convert("L").point(lambda p: 255 if p > tolerance else 0)
+    bbox = mask.getbbox()
+    return img.crop(bbox) if bbox else img
+
+
 def compose_packed_and_unpacked_image(boxed_bytes: bytes, unpacked_bytes: bytes, out_path: str) -> None:
     """Pastes the two REAL photos (the admin's own boxed photo, and a
     separately generated clean unpacked photo) side by side on one square
@@ -2163,8 +2247,8 @@ def compose_packed_and_unpacked_image(boxed_bytes: bytes, unpacked_bytes: bytes,
     the same height with a comfortable margin between them. Deterministic
     (no generative model composes anything), so both instances are
     guaranteed present, unlike asking one edit call to render both."""
-    boxed = Image.open(BytesIO(boxed_bytes)).convert("RGB")
-    unpacked = Image.open(BytesIO(unpacked_bytes)).convert("RGB")
+    boxed = _trim_whitespace(Image.open(BytesIO(boxed_bytes)).convert("RGB"))
+    unpacked = _trim_whitespace(Image.open(BytesIO(unpacked_bytes)).convert("RGB"))
     canvas_size = max(MIN_OUTPUT_PX, boxed.height, unpacked.height)
     margin = canvas_size // 20
     panel_h = canvas_size - 2 * margin
@@ -3057,6 +3141,30 @@ def _to_cm(value: "float | None", unit: str) -> "float | None":
     return value * _CM_PER_UNIT.get((unit or "cm").strip().lower(), 1.0)
 
 
+# Judging absolute real-world size in centimeters from a photo is a known
+# weak point for vision models, especially for small, plain, texture-poor
+# round objects — a real table tennis ball (4cm dia, admin-listed as "Dia -
+# 40 mm") shipped visibly oversized (closer to 8-10cm by direct visual
+# re-inspection) while the verifier's own cm self-estimate still passed the
+# ratio check, meaning its estimate itself was too far off, not the
+# threshold logic. A familiar everyday-object comparison is a much more
+# reliable anchor for both the generation prompt (something to actually
+# render against) and the verification prompt (something to actually judge
+# against) than an abstract number of centimeters alone.
+_SIZE_COMPARISONS = (
+    (2, "a coin or a large button"), (5, "a golf ball"), (8, "a tennis ball"),
+    (13, "a fist or a grapefruit"), (20, "a basketball"), (35, "a car tire"),
+    (60, "a bicycle wheel"), (100, "a dining table's width"),
+)
+
+
+def _familiar_size_comparison(cm: float) -> str:
+    for threshold, comparison in _SIZE_COMPARISONS:
+        if cm <= threshold:
+            return comparison
+    return "an adult's full height or taller"
+
+
 _AMBIGUOUS_DIMENSION_NUMBER_RE = re.compile(r"[\d.]+")
 _AMBIGUOUS_DIMENSION_UNIT_RE = re.compile(r"([a-zA-Z]+)\s*$")
 
@@ -3298,7 +3406,13 @@ def verify_generated_image_generic(image_bytes: bytes, reference_bytes: bytes,
     if known_length_cm is not None:
         scale_note = (
             f"\n\nThis product's actual real-world longest dimension, AS "
-            f"PACKAGED/FOLDED, is {known_length_cm:.1f} cm. Look for a person, "
+            f"PACKAGED/FOLDED, is {known_length_cm:.1f} cm — roughly the size of "
+            f"{_familiar_size_comparison(known_length_cm)}. Use that concrete "
+            f"comparison, not just the raw number, when estimating the rendered "
+            f"size — exact centimeter judgment from a photo alone is easy to get "
+            f"wrong, especially for small, plain, texture-poor objects (a real "
+            f"defect: a 4cm table tennis ball was judged as plausible size when "
+            f"it was actually rendered closer to 8-10cm). Look for a person, "
             f"hand, or other familiar-sized object in the SECOND image and use "
             f"it to judge whether the product is rendered at a plausible "
             f"real-world scale — fill in scale_reference_present, "
@@ -3399,6 +3513,21 @@ def verify_generated_image_generic(image_bytes: bytes, reference_bytes: bytes,
         if feature_highlighted and not parsed.get("feature_supported_by_product_facts", True):
             valid = False
             reason = f"unsupported_or_duplicate_feature '{feature_highlighted}': {reason}"
+        if feature_highlighted and exclude_features:
+            # Deterministic backup for the check above — real defect
+            # (product 2145): feature_1 and feature_2 both came back
+            # captioned "Wax Building Blocks" (one ALL CAPS, one Title
+            # Case) and the verifier's OWN feature_supported_by_product_facts
+            # judgment missed the overlap both times, shipping both as a
+            # clean pass. Same word-overlap logic already proven at
+            # extraction time (extract_distinct_features' de-dupe) applied
+            # again here — never rely solely on the model's own judgment
+            # for a check this mechanical (shared significant words = same
+            # physical feature, case and phrasing aside).
+            highlighted_words = _feature_content_words(feature_highlighted)
+            if any(highlighted_words & _feature_content_words(ef) for ef in exclude_features):
+                valid = False
+                reason = f"duplicate_feature_word_overlap '{feature_highlighted}' vs {exclude_features}: {reason}"
         feature_label_text = (parsed.get("feature_label_text_exact") or "").strip()
         if feature_label_text and not parsed.get("feature_label_spelled_correctly", True):
             valid = False
@@ -3425,8 +3554,7 @@ def verify_generated_image_generic(image_bytes: bytes, reference_bytes: bytes,
             valid = False
             reason = f"missing_packed_or_unpacked: {reason}"
             failure_categories.append(FAILURE_MISSING_PACKED_OR_UNPACKED)
-        if (known_length_cm and parsed.get("scale_reference_present")
-                and parsed.get("product_estimated_length_cm")):
+        if known_length_cm and parsed.get("scale_reference_present") and parsed.get("product_estimated_length_cm"):
             estimated = parsed["product_estimated_length_cm"]
             ratio = estimated / known_length_cm
             if is_scale_ratio_mismatch(ratio):
@@ -3438,6 +3566,18 @@ def verify_generated_image_generic(image_bytes: bytes, reference_bytes: bytes,
                     f"judged against {parsed.get('scale_reason', 'a visible reference')}: {reason}"
                 )
                 failure_categories.append(FAILURE_SCALE_MISMATCH)
+        elif known_length_cm and not parsed.get("scale_reference_present"):
+            # A real product (a table tennis ball pack) shipped a plain
+            # product packshot for its "Lifestyle" slot — no person, no
+            # hand, no real-world setting at all — which trivially dodges
+            # the ratio check above (nothing to compare against) while
+            # also failing the slot's actual requirement ("age-appropriate,
+            # supervised use ... in a realistic setting"). When we have a
+            # real known size to check against, omitting every possible
+            # scale reference is itself a defect, not a free pass.
+            valid = False
+            reason = f"no_scale_reference_in_lifestyle_scene: {reason}"
+            failure_categories.append(FAILURE_SCALE_MISMATCH)
         return {"valid": valid, "reason": reason, "failure_categories": failure_categories}
     except (requests.RequestException, json.JSONDecodeError, KeyError, IndexError) as e:
         return {"valid": True, "reason": f"verification_error: {e}"}
@@ -3927,11 +4067,15 @@ def build_retry_feedback_text(failure_categories: list, reason: str, layout_plan
         )
     if FAILURE_SCALE_MISMATCH in cats:
         lines.append(
-            "- The product was rendered at the wrong real-world scale relative to "
-            "the person/hand/object in this scene — re-render it noticeably "
-            "smaller or larger (per the failure reason above) so its size "
-            "relative to that person/object genuinely matches its real listed "
-            "dimensions, not an enlarged or shrunk 'hero' size."
+            "- Either the product was rendered at the wrong real-world scale "
+            "relative to the person/hand/object in the scene, or the scene had NO "
+            "person/hand/familiar-sized object in it at all to judge scale "
+            "against (see the failure reason above for which). Re-render this as "
+            "a genuine real-world scene that clearly includes a person or their "
+            "hand interacting with the product, sized so the product's real "
+            "listed dimensions look correct next to them — not an isolated "
+            "product shot with nothing to judge its size against, and not an "
+            "enlarged or shrunk 'hero' size."
         )
     if FAILURE_FEATURE_LABEL_SPELLING in cats:
         lines.append(
@@ -4491,10 +4635,12 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
             # alternate product view for this slot instead of a feature
             # callout.
             no_feature_available = True
-            forced_variation = (
-                "a different full or three-quarter view of the complete "
-                "product, clearly distinct from this product's other images"
-            )
+            # Indexed by this slot's feature-family position (idx, same as
+            # the real-feature branch above) — NOT a fixed string — so two
+            # sibling slots that both land here still get different,
+            # non-invented camera views instead of an identical prompt.
+            # See NO_FEATURE_VIEW_ROTATION's definition for why.
+            forced_variation = NO_FEATURE_VIEW_ROTATION[idx % len(NO_FEATURE_VIEW_ROTATION)]
             exclude_features = extracted
         # else: extraction produced nothing usable at all — keep the
         # pre-existing generic rotation fallback (task["forced_variation"]),
@@ -4690,11 +4836,35 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
             except Exception:
                 used_deterministic = False
             if used_deterministic:
-                dim_attempt_log.append({"attempt": 1, "valid": True,
-                                        "reason": "deterministic_opencv_pipeline_success",
-                                        "failure_categories": []})
-                dim_result = {"status": "generated"}
-            else:
+                # The DRAWING is deterministic (real PIL arrows, no
+                # generative text/number rendering) but the CORNER
+                # DETECTION feeding it is still a computer-vision guess —
+                # try_deterministic_dimension_image's own confidence gate
+                # missed a real case (product 2145, a 3/4-perspective box)
+                # where the detected corners were off enough that every
+                # arrow endpoint landed in blank background, nowhere near
+                # the product, and this path shipped it as an unconditional
+                # pass with no check at all. Route it through the same
+                # vision-based verify_dimension_image gate as the
+                # generative path before trusting it; fall through to the
+                # generative retry-verified path (unchanged) on failure,
+                # exactly like any other "uncertainty" case here.
+                try:
+                    with open(dim_out_path, "rb") as f:
+                        det_image_bytes = f.read()
+                    det_verdict = verify_dimension_image(
+                        det_image_bytes, axis_labels, project_id, region, tokens,
+                        is_vehicle=is_vehicle, text_only_label=text_only_label)
+                except Exception as e:
+                    det_verdict = {"valid": False, "reason": f"post_check_error: {e}"}
+                dim_attempt_log.append({"attempt": 1, "valid": det_verdict.get("valid"),
+                                        "reason": det_verdict.get("reason", ""),
+                                        "failure_categories": ["deterministic_opencv_pipeline"]})
+                if det_verdict.get("valid"):
+                    dim_result = {"status": "generated"}
+                else:
+                    used_deterministic = False
+            if not used_deterministic:
                 dim_result = generate_image_with_verification(
                     slot_reference_url, dim_prompt, dim_out_path, project_id, region, tokens,
                     axis_labels, is_vehicle=is_vehicle, text_only_label=text_only_label,

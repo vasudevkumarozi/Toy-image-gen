@@ -678,6 +678,47 @@ def test_31_compose_packed_and_unpacked_image_produces_square_canvas_with_both_p
     os.remove(tmp_path)
 
 
+def test_32_feature_word_overlap_check_is_deterministic():
+    """Real defect (product 2145, a wax-blocks-and-crayons toy): feature_1
+    and feature_2 both came back captioned "Wax Building Blocks" — one ALL
+    CAPS, one Title Case — and the verifier's own LLM judgment
+    (feature_supported_by_product_facts) missed the overlap both times,
+    shipping both as a clean pass. The deterministic word-overlap check
+    (same logic as extract_distinct_features' own de-dupe) must catch this
+    regardless of case or exact phrasing."""
+    check("T32 identical feature, different case, is caught as overlapping",
+         bool(g._feature_content_words("WAX BUILDING BLOCKS")
+              & g._feature_content_words("Wax Building Blocks")))
+    check("T32 genuinely different features do not overlap",
+         not (g._feature_content_words("Easy-Grip Handle")
+              & g._feature_content_words("Wax Building Blocks")))
+
+
+def test_33_lifestyle_no_scale_reference_is_a_failure():
+    """Real defect (a table-tennis-ball pack): the 'Lifestyle' slot shipped
+    a plain product packshot — no person, no hand, no real-world setting at
+    all — which dodges the ratio-mismatch check entirely (nothing to
+    compare against) while also failing the slot's own requirement. When a
+    real known size exists, omitting every scale reference must itself be
+    treated as a failure, not a silent pass."""
+    feedback = g.build_retry_feedback_text([g.FAILURE_SCALE_MISMATCH], "no_scale_reference_in_lifestyle_scene: test", None)
+    check("T33 retry feedback covers the no-reference-at-all case too",
+         "NO person/hand" in feedback)
+
+
+def test_34_familiar_size_comparison_for_small_objects():
+    """Real defect: a 4cm table tennis ball (admin-listed 'Dia - 40 mm')
+    shipped visibly oversized (~8-10cm) in its lifestyle scene, yet the
+    verifier's own raw-centimeter self-estimate still passed the ratio
+    check — the estimate itself was inaccurate, not the threshold logic.
+    A concrete everyday-object comparison is a more reliable anchor than
+    an abstract number for both rendering and judging small objects."""
+    check("T34 a table-tennis-ball-sized object compares to something small",
+         g._familiar_size_comparison(4) in ("a coin or a large button", "a golf ball"))
+    check("T34 a much larger object gets a correspondingly larger comparison",
+         g._familiar_size_comparison(90) != g._familiar_size_comparison(4))
+
+
 def run_pure_tests():
     print("=== PURE tests (no network) ===")
     test_1_box_20_15_2()
@@ -712,6 +753,9 @@ def run_pure_tests():
     test_29_packed_and_unpacked_combo_slot_not_suppressed_by_angle_rule()
     test_30_missing_packed_or_unpacked_failure_category()
     test_31_compose_packed_and_unpacked_image_produces_square_canvas_with_both_panels()
+    test_32_feature_word_overlap_check_is_deterministic()
+    test_33_lifestyle_no_scale_reference_is_a_failure()
+    test_34_familiar_size_comparison_for_small_objects()
     test_retry_feedback_is_failure_specific()
 
 
