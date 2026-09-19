@@ -4567,6 +4567,8 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
             None,
         )
         if boxed_url:
+            composed = False
+            unpacked_out_path = out_path + ".unpacked_tmp.png"
             try:
                 # FRONT-FACING, not "a different angle" — this panel sits
                 # right next to the boxed panel (which itself faces front,
@@ -4590,7 +4592,6 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
                     forced_variation=("the complete UNBOXED product facing the camera "
                                       "directly, front-on, on a plain white "
                                       "background — not from the back or a side angle"))
-                unpacked_out_path = out_path + ".unpacked_tmp.png"
                 unpacked_result = generate_image_with_verification(
                     boxed_url, unpacked_prompt, unpacked_out_path, project_id, region, tokens,
                     axis_labels=[], product_name=task["product_name"],
@@ -4602,13 +4603,36 @@ def process_slot_task(task: dict, project_id: str, region: str, tokens: VertexTo
                     with open(unpacked_out_path, "rb") as f:
                         unpacked_bytes = f.read()
                     compose_packed_and_unpacked_image(boxed_bytes, unpacked_bytes, out_path)
-                    os.remove(unpacked_out_path)
-                    gcp_link, upload_failures = maybe_upload(uploader, upload_cache, filename, out_path, 0)
-                    return {**row_base, "Status": "Generated", "Image_Source": filename,
-                           "GCP_Link": gcp_link, "_bucket": "Generated",
-                           "_upload_failed": upload_failures > 0}
+                    composed = True
             except Exception:
-                pass
+                composed = False
+            finally:
+                # Clean up the intermediate unpacked-only file regardless of
+                # outcome above — only `out_path` (the final composite) is
+                # ever read by later steps, so leaving this behind on any
+                # failure path served no purpose (confirmed real leak: a
+                # `.unpacked_tmp.png` per failed attempt, never cleaned up
+                # by any later run since nothing else references it).
+                if os.path.exists(unpacked_out_path):
+                    try:
+                        os.remove(unpacked_out_path)
+                    except OSError:
+                        pass
+            if composed:
+                # out_path now holds the correct, real packed+unpacked
+                # composite — commit to returning it here. A failure in
+                # maybe_upload below must NOT fall through to the generic
+                # single-instance generation path below, which would
+                # silently overwrite this correct composite with a wrong
+                # image and no error surfaced (confirmed real bug: the old
+                # code kept this return inside the same try/except that
+                # also did cleanup+upload, so an exception AFTER a
+                # successful compose — e.g. a transient upload error —
+                # discarded the already-correct image).
+                gcp_link, upload_failures = maybe_upload(uploader, upload_cache, filename, out_path, 0)
+                return {**row_base, "Status": "Generated", "Image_Source": filename,
+                       "GCP_Link": gcp_link, "_bucket": "Generated",
+                       "_upload_failed": upload_failures > 0}
 
     forced_variation = task["forced_variation"]
     exclude_features = None

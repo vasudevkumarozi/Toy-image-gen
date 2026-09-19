@@ -100,7 +100,13 @@ def parse_slot_map(text: str) -> dict:
     result = {}
     if not isinstance(text, str):
         return result
-    for part in text.split(";"):
+    # Splits on the exact SLOT_MAP_SEPARATOR ("; "), not a bare ";" — a
+    # semicolon is a legal unencoded URL character (e.g. matrix params in a
+    # query string), and format_slot_map only ever inserts one BETWEEN
+    # entries as "; ". Splitting on bare ";" would cut a URL containing one
+    # mid-string, silently truncating it and dropping the fragment after
+    # the last ";" (no ":" in it, so it fails the check below unnoticed).
+    for part in text.split(SLOT_MAP_SEPARATOR):
         part = part.strip()
         if ":" not in part:
             continue
@@ -483,8 +489,20 @@ class Checkpoint:
                     line = line.strip()
                     if not line:
                         continue
-                    entry = json.loads(line)
-                    self._done[entry["key"]] = entry["row"]
+                    # A crash/VM-preemption mid-write (the exact scenario
+                    # this class exists to survive) can leave the LAST line
+                    # truncated — only that one line, since record() fsyncs
+                    # each line before returning. Skipping a bad line here
+                    # (instead of letting json.loads/KeyError propagate) is
+                    # what makes resuming after a real crash actually work;
+                    # without this, resuming a 1000+ product run after the
+                    # crash this checkpoint is meant to survive would itself
+                    # crash on the one partial line.
+                    try:
+                        entry = json.loads(line)
+                        self._done[entry["key"]] = entry["row"]
+                    except (json.JSONDecodeError, KeyError):
+                        print(f"WARNING: skipping unreadable checkpoint line in {path!r}: {line[:200]!r}")
         except FileNotFoundError:
             pass
         self._fh = open(path, "a", encoding="utf-8")
