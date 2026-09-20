@@ -229,8 +229,21 @@ def _label_dimension_value(key: str, value: str) -> str:
     other_horiz_idx = [i for i, l in enumerate(letters) if l in ("w", "b")]
     if len(length_idx) == 1 and len(other_horiz_idx) == 1:
         li, oi = length_idx[0], other_horiz_idx[0]
-        if float(numbers[li]) < float(numbers[oi]):
-            numbers[li], numbers[oi] = numbers[oi], numbers[li]
+        # `numbers` comes from a bare `[\d.]+` regex, which lets a malformed
+        # value with more than one "." through (a real admin typo, e.g.
+        # "9..5") — float() on that raised ValueError uncaught here, which
+        # crashed this whole product's generation (confirmed real incident:
+        # took down an entire 20,635-slot bulk run at 99.75% complete). This
+        # swap is a best-effort relabeling, not something worth crashing
+        # over — on a malformed number, just skip the reorder and pass the
+        # value through as-is; _parse_labeled_axis_values downstream is the
+        # actual gate that decides whether malformed data can be trusted at
+        # all, and correctly rejects it there instead.
+        try:
+            if float(numbers[li]) < float(numbers[oi]):
+                numbers[li], numbers[oi] = numbers[oi], numbers[li]
+        except ValueError:
+            pass
     labeled = [f"{_AXIS_LABELS[letter]} {num} {unit}".strip()
               for letter, num in zip(letters, numbers)]
     return ", ".join(labeled)
@@ -288,9 +301,27 @@ def _parse_labeled_axis_values(labeled_text: str) -> dict:
     than trusting the raw text blindly."""
     out = {}
     unit = ""
-    for axis, num, u in _AXIS_VALUE_RE.findall(labeled_text):
-        out[axis] = float(num)
-        unit = unit or u
+    # `[\d.]+` in the regex above allows a malformed number with more than
+    # one "." through (e.g. a real admin typo, "9..5 cm") — float() on that
+    # raises ValueError. This used to be uncaught, which took down an
+    # entire worker thread and, via run_concurrent's future.result(), the
+    # WHOLE multi-thousand-product bulk run (confirmed real incident: a
+    # 20,635-slot run crashed at 99.75% complete on this exact exception
+    # from one bad product's data). If ANY matched axis fails to parse,
+    # abandon the whole labeled_text and return {} — same as "nothing
+    # parsed" per this function's own contract — rather than silently
+    # returning a PARTIAL result with one axis missing: callers key
+    # DIMENSION_STATUS_VERIFIED on "every matched axis parsed cleanly", and
+    # a partial dict (e.g. Length missing but Breadth/Height present) would
+    # let a None slip into arithmetic/formatting code downstream that
+    # assumes VERIFIED means all three numbers are real — trading one crash
+    # for another instead of actually fixing it.
+    try:
+        for axis, num, u in _AXIS_VALUE_RE.findall(labeled_text):
+            out[axis] = float(num)
+            unit = unit or u
+    except ValueError:
+        return {}
     if out:
         out["_unit"] = unit
     return out
