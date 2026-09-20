@@ -1911,7 +1911,15 @@ def axis_label_magnitude(label: str) -> float:
     should land on the visually longer vs shorter edge) and
     verify_dimension_image (to check it actually did)."""
     m = re.search(r"[\d.]+", label)
-    return float(m.group()) if m else 0.0
+    if not m:
+        return 0.0
+    try:
+        return float(m.group())
+    except ValueError:
+        # Same malformed-number class as elsewhere in this file (e.g. a
+        # real admin typo like "9..5") — fail open to 0.0 rather than
+        # crashing the whole worker on one bad label string.
+        return 0.0
 
 
 VEHICLE_KEYWORDS = ("cars & rc", "rc toy", "ride-on", "ride on", "tricycle", "wheel")
@@ -3181,7 +3189,18 @@ def _ambiguous_longest_dimension_cm(raw_text: str) -> "float | None":
     VERIFIED data (as before) meant most products with an unlabeled
     "Dimensions / Size: 20 x 15 x 2 cm" got NO lifestyle scale check at all.
     Returns None if raw_text has no parseable numbers."""
-    numbers = [float(n) for n in _AMBIGUOUS_DIMENSION_NUMBER_RE.findall(raw_text or "")]
+    # _AMBIGUOUS_DIMENSION_NUMBER_RE is a bare `[\d.]+`, which lets a
+    # malformed value with more than one "." through (a real admin typo,
+    # e.g. "9..5") — float() on that raised ValueError uncaught here,
+    # crashing the whole worker/bulk run over one bad number in text that
+    # is BY DEFINITION already unverified/ambiguous. Skip anything that
+    # doesn't parse rather than trusting it blindly or crashing on it.
+    numbers = []
+    for n in _AMBIGUOUS_DIMENSION_NUMBER_RE.findall(raw_text or ""):
+        try:
+            numbers.append(float(n))
+        except ValueError:
+            continue
     if not numbers:
         return None
     unit_match = _AMBIGUOUS_DIMENSION_UNIT_RE.search((raw_text or "").strip())
